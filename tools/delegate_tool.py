@@ -216,37 +216,6 @@ def interrupt_subagent(subagent_id: str) -> bool:
     return True
 
 
-def interrupt_subagents_for_session(parent_session_id: str) -> int:
-    """Interrupt every running subagent spawned by the given session.
-
-    Targets background-detached top-level subagents, which ``AIAgent.interrupt()``
-    no longer reaches (they were removed from the parent's ``_active_children``
-    when detached) — the gap that lets a "stop" leave delegated work running.
-    Each child's own ``interrupt()`` recurses into its grandchildren, so this
-    only needs to hit the top level. Scoped by ``parent_session_id`` so a stop
-    in one chat never cancels another chat's subagents. Returns the count hit.
-    """
-    key = (parent_session_id or "").strip()
-    if not key:
-        return 0
-
-    with _active_subagents_lock:
-        records = list(_active_subagents.values())
-
-    count = 0
-    for record in records:
-        agent = record.get("agent")
-        if agent is None or getattr(agent, "parent_session_id", None) != key:
-            continue
-        try:
-            agent.interrupt("Session stopped")
-            count += 1
-        except Exception as exc:
-            logger.debug("interrupt_subagents_for_session: child interrupt failed: %s", exc)
-
-    return count
-
-
 def list_active_subagents() -> List[Dict[str, Any]]:
     """Snapshot of the currently running subagent tree.
 

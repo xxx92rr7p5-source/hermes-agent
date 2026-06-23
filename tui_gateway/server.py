@@ -6251,42 +6251,10 @@ def _(rid, params: dict) -> dict:
                 session["running"] = False
                 _clear_inflight_turn(session)
 
-    # Full abort: "stop" must stop EVERYTHING. The cooperative agent interrupt
-    # breaks the loop and kills the in-flight foreground subprocess, but any
-    # background processes this session spawned (servers, watchers, bg tasks)
-    # are detached and would otherwise keep running after stop. Kill them too,
-    # matched by session_key (the bg task_id collapses to the shared "default"
-    # container, so a task_id filter would miss them) so other sessions are
-    # untouched.
-    try:
-        from tools.process_registry import process_registry
-
-        key = str(session.get("session_key") or "")
-        killed = 0
-        for entry in process_registry.list_sessions():
-            proc = process_registry.get(entry["session_id"])
-            if proc is None or proc.exited or str(getattr(proc, "session_key", "") or "") != key:
-                continue
-            if process_registry.kill_process(entry["session_id"], source="session.interrupt").get("status") in {
-                "killed",
-                "already_exited",
-            }:
-                killed += 1
-        if killed:
-            logger.info("session.interrupt: killed %d background process(es)", killed)
-    except Exception:
-        logger.debug("session.interrupt: background process kill failed", exc_info=True)
-
-    # …and any background-detached subagents this session spawned (they're off
-    # the parent's interrupt-propagation list once detached).
-    try:
-        from tools.delegate_tool import interrupt_subagents_for_session
-
-        stopped = interrupt_subagents_for_session(session.get("session_key", ""))
-        if stopped:
-            logger.info("session.interrupt: interrupted %d background subagent(s)", stopped)
-    except Exception:
-        logger.debug("session.interrupt: subagent interrupt failed", exc_info=True)
+    # Stop = stop the TURN (cooperative interrupt above also kills the in-flight
+    # foreground subprocess). Background processes the agent started (dev servers,
+    # watchers) are intentionally left running — kill those individually with the
+    # "x" on the task row (process.kill). Don't reap them here.
     # Scope the pending-prompt release to THIS session.  A global
     # _clear_pending() would collaterally cancel clarify/sudo/secret
     # prompts on unrelated sessions sharing the same tui_gateway

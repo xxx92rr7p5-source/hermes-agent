@@ -5,6 +5,7 @@ import type { TodoItem, TodoStatus } from '@/lib/todos'
 
 import { $gateway } from './gateway'
 import { dispatchNativeNotification } from './native-notifications'
+import { notifyError } from './notifications'
 import { $subagentsBySession, type SubagentProgress } from './subagents'
 import { $todosBySession } from './todos'
 
@@ -239,13 +240,17 @@ export function dismissBackgroundProcess(sid: string, id: string) {
   )
 }
 
-/** X on a running row: kill the process for real, then drop the row. */
-export function stopBackgroundProcess(sid: string, id: string) {
-  void $gateway
-    .get()
-    ?.request('process.kill', { process_id: id, session_id: sid })
-    .catch(() => undefined)
-  dismissBackgroundProcess(sid, id)
+/** X on a running row: kill the process for real, THEN drop the row. Only drop
+ *  on a confirmed kill — dismissing unconditionally (the old behavior) hid the
+ *  row while the process lived on, stranding rogue tasks. On failure the row
+ *  stays so the user can retry / see it didn't die. */
+export async function stopBackgroundProcess(sid: string, id: string): Promise<void> {
+  try {
+    await $gateway.get()?.request('process.kill', { process_id: id, session_id: sid })
+    dismissBackgroundProcess(sid, id)
+  } catch (err) {
+    notifyError(err, 'Could not stop the process')
+  }
 }
 
 /**

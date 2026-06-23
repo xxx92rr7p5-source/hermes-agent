@@ -124,7 +124,7 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
             key={item.id}
             onDismiss={sessionId ? id => dismissBackgroundProcess(sessionId, id) : undefined}
             onOpen={() => openSubagent(item)}
-            onStop={sessionId ? id => stopBackgroundProcess(sessionId, id) : undefined}
+            onStop={sessionId ? id => void stopBackgroundProcess(sessionId, id) : undefined}
           />
         ))}
       </StatusSection>
