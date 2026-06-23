@@ -1,6 +1,9 @@
 import { atom, computed } from 'nanostores'
 
+import { SIDEBAR_COLLAPSE_MEDIA_QUERY } from '@/app/layout-constants'
+import { PANE_TOGGLE_REVEAL_EVENT } from '@/components/pane-shell'
 import type { HermesReviewFile, HermesReviewShipInfo } from '@/global'
+import { matchesQuery } from '@/hooks/use-media-query'
 import { isExcludedPath } from '@/lib/excluded-paths'
 import { requestOneShot } from '@/lib/oneshot'
 import { Codecs, persistentAtom } from '@/lib/persisted'
@@ -17,6 +20,10 @@ import { $workspaceChangeTick } from './workspace-events'
 // Scope is always "uncommitted" — Hermes' flow is agent edits you review BEFORE
 // committing, so branch/last-turn scopes are almost always empty here (unlike
 // Codex, which commits per turn). We show the one view that's always populated.
+
+// Must match the review <Pane id> in desktop-controller (the forced-reveal
+// event is addressed by pane id).
+export const REVIEW_PANE_ID = 'review'
 
 const OPEN_KEY = 'hermes.desktop.reviewOpen'
 const COMMIT_DEFAULT_KEY = 'hermes.desktop.reviewCommitDefault'
@@ -248,6 +255,19 @@ export function closeReview(): void {
 }
 
 export function toggleReview(): void {
+  // Narrow width: the pane is a collapsed overlay (like the sidebar under ⌘B).
+  // Make sure its data is loaded, then slide it in/out via the forced-reveal pin
+  // — never the docked open state, which a 0px track would render invisibly.
+  if (matchesQuery(SIDEBAR_COLLAPSE_MEDIA_QUERY)) {
+    if (!$reviewOpen.get()) {
+      openReview()
+    }
+
+    window.dispatchEvent(new CustomEvent(PANE_TOGGLE_REVEAL_EVENT, { detail: { id: REVIEW_PANE_ID } }))
+
+    return
+  }
+
   if ($reviewOpen.get()) {
     closeReview()
   } else {

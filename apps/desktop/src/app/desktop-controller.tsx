@@ -51,7 +51,7 @@ import {
   refreshActiveProfile
 } from '../store/profile'
 import { $startWorkSessionRequest, resolveNewSessionCwd } from '../store/projects'
-import { $reviewOpen } from '../store/review'
+import { $reviewOpen, REVIEW_PANE_ID } from '../store/review'
 import {
   $activeSessionId,
   $currentCwd,
@@ -1187,12 +1187,19 @@ export function DesktopController() {
       // The diff pane only makes sense in a workspace, so force it shut when the
       // session is detached — "No diffs" then only ever shows inside a project,
       // never as a second empty panel next to the file browser.
-      disabled={!chatOpen || !reviewOpen || !currentCwd.trim()}
+      // Docked (wide): `reviewOpen` gates it. Narrow: drop `reviewOpen` from the
+      // gate so the pane stays mounted as a collapsed overlay — `toggleReview`
+      // then slides it in/out via the forced-reveal pin, exactly like ⌘B for the
+      // sidebar. Still requires a repo (no diffs to show otherwise).
+      disabled={!chatOpen || !currentCwd.trim() || (!narrowViewport && !reviewOpen)}
       forceCollapsed={narrowViewport}
-      id="review"
+      hoverReveal
+      id={REVIEW_PANE_ID}
       key="review"
       maxWidth={FILE_BROWSER_MAX_WIDTH}
       minWidth={FILE_BROWSER_MIN_WIDTH}
+      // Mobile overlay sits at its min width — compact, doesn't bury the chat.
+      overlayWidth={FILE_BROWSER_MIN_WIDTH}
       resizable
       side={railSide}
       width={FILE_BROWSER_DEFAULT_WIDTH}
