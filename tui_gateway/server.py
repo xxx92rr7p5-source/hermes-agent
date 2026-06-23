@@ -3394,11 +3394,52 @@ def _agent_cbs(sid: str) -> dict:
     }
 
 
+def _apply_project_workspace(task_id: str, path: str, _name: str = "") -> None:
+    """Intentional workspace move from the project_* tools: re-anchor the live
+    session's cwd to the chosen project's folder and push session.info so the
+    desktop follows (refresh tree + scope into the project). This is the ONLY
+    auto-cwd path — driven by an explicit tool call, never a terminal `cd`."""
+    sid = str(task_id or "")
+    session = _sessions.get(sid)
+    if not session or not path:
+        return
+
+    resolved = os.path.abspath(os.path.expanduser(str(path)))
+    if not os.path.isdir(resolved):
+        return
+
+    session["cwd"] = resolved
+    session["explicit_cwd"] = True
+    _register_session_cwd(session)
+
+    with _session_db(session) as db:
+        if db is not None:
+            try:
+                db.update_session_cwd(session.get("session_key", ""), resolved)
+            except Exception:
+                logger.debug("failed to persist project workspace cwd", exc_info=True)
+
+    _persist_session_git_meta(session, resolved)
+
+    try:
+        agent = session.get("agent")
+        info = (
+            _session_info(agent, session)
+            if agent is not None
+            else {"cwd": resolved, "branch": _git_branch_for_cwd(resolved), "lazy": True}
+        )
+        _emit("session.info", sid, info)
+    except Exception:
+        logger.debug("failed to emit session.info after project workspace move", exc_info=True)
+
+
 def _wire_callbacks(sid: str):
     from tools.terminal_tool import set_sudo_password_callback
     from tools.skills_tool import set_secret_capture_callback
+    from tools.project_tools import set_project_workspace_callback
 
     set_sudo_password_callback(lambda: _block("sudo.request", sid, {}, timeout=120))
+    set_project_workspace_callback(_apply_project_workspace)
 
     def secret_cb(env_var, prompt, metadata=None):
         pl = {"prompt": prompt, "env_var": env_var}

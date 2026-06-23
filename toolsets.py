@@ -51,6 +51,9 @@ _HERMES_CORE_TOOLS = [
     "text_to_speech",
     # Planning & memory
     "todo", "memory",
+    # Desktop Projects (gateway-gated; the agent's intentional handle on the
+    # sidebar's named workspaces)
+    "project_list", "project_create", "project_switch",
     # Session history search
     "session_search",
     # Clarifying questions
@@ -220,6 +223,12 @@ TOOLSETS = {
     "session_search": {
         "description": "Search and recall past conversations with summarization",
         "tools": ["session_search"],
+        "includes": []
+    },
+
+    "project": {
+        "description": "Desktop Projects — create/switch named workspaces (gateway only)",
+        "tools": ["project_list", "project_create", "project_switch"],
         "includes": []
     },
     
