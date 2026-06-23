@@ -6,6 +6,7 @@ import { TreeSkeleton } from '@/components/chat/skeletons'
 import { Codicon } from '@/components/ui/codicon'
 import { useResizeObserver } from '@/hooks/use-resize-observer'
 import { cn } from '@/lib/utils'
+import { $repoChangeByPath, type RepoChangeKind } from '@/store/coding-status'
 import { $renamingPath, beginInlineRename } from '@/store/file-actions'
 import { $revealInTreeRequest } from '@/store/layout'
 
@@ -57,6 +58,7 @@ export function ProjectTree({
   const containerRef = useRef<HTMLDivElement | null>(null)
   const treeRef = useRef<TreeApi<TreeNode> | null>(null)
   const [size, setSize] = useState({ height: 0, width: 0 })
+  const changeByPath = useStore($repoChangeByPath)
 
   const syncTreeSize = useCallback(() => {
     const el = containerRef.current
@@ -198,6 +200,7 @@ export function ProjectTree({
           {props => (
             <ProjectTreeRow
               {...props}
+              changeKind={props.node.data ? changeByPath.get(props.node.data.id) : undefined}
               onAttachFile={onActivateFile}
               onAttachFolder={onActivateFolder}
               onPreviewFile={onPreviewFile}
@@ -234,7 +237,14 @@ function ProjectTreeRowContainer({ attrs, children, innerRef, node }: RowRendere
   )
 }
 
+const CHANGE_TINT: Record<RepoChangeKind, string> = {
+  added: 'text-(--ui-green)',
+  conflicted: 'text-(--ui-red)',
+  modified: 'text-(--ui-yellow)'
+}
+
 function ProjectTreeRow({
+  changeKind,
   dragHandle,
   node,
   onAttachFile,
@@ -243,6 +253,7 @@ function ProjectTreeRow({
   relativeTo,
   style
 }: NodeRendererProps<TreeNode> & {
+  changeKind?: RepoChangeKind
   onAttachFile: (path: string) => void
   onAttachFolder: (path: string) => void
   onPreviewFile?: (path: string) => void
@@ -334,7 +345,9 @@ function ProjectTreeRow({
       {editing ? (
         <InlineRenameInput name={node.data.name} path={node.data.id} />
       ) : (
-        <span className="min-w-0 flex-1 truncate">{node.data.name}</span>
+        // Git decoration (VS Code-style): tint changed files; the explicit color
+        // wins over the row's hover/selected text color, so it persists.
+        <span className={cn('min-w-0 flex-1 truncate', changeKind && CHANGE_TINT[changeKind])}>{node.data.name}</span>
       )}
     </div>
   )

@@ -1,4 +1,4 @@
-import { atom } from 'nanostores'
+import { atom, computed } from 'nanostores'
 
 import type { HermesGitWorktree, HermesRepoStatus } from '@/global'
 
@@ -20,6 +20,28 @@ export const $repoStatusLoading = atom(false)
 // Refreshed on the same edges as the status probe; empty off a repo.
 export const $repoWorktrees = atom<HermesGitWorktree[]>([])
 const REPO_STATUS_REFRESH_DEBOUNCE_MS = 100
+
+export type RepoChangeKind = 'added' | 'conflicted' | 'modified'
+
+// Absolute file path → its git change kind, for VS Code-style file-tree tinting.
+// Reuses the same bounded $repoStatus probe (capped file list); git reports
+// repo-root-relative paths, so we join them onto the active cwd. Deletions never
+// appear — the file is gone from disk, so there's no tree row to tint.
+export const $repoChangeByPath = computed([$repoStatus, $currentCwd], (status, cwd) => {
+  const map = new Map<string, RepoChangeKind>()
+  const root = (cwd || '').replace(/[/\\]+$/, '')
+
+  if (!status || !root) {
+    return map
+  }
+
+  for (const file of status.files) {
+    const kind: RepoChangeKind = file.conflicted ? 'conflicted' : file.untracked ? 'added' : 'modified'
+    map.set(`${root}/${file.path}`, kind)
+  }
+
+  return map
+})
 
 async function loadWorktrees(target: string): Promise<void> {
   const list = window.hermesDesktop?.git?.worktreeList
