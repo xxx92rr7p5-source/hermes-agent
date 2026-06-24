@@ -2259,12 +2259,23 @@ class CLICommandsMixin:
                 fh.write(header)
                 if initial_text:
                     fh.write(initial_text)
+            # 隐藏 Windows 上的子进程 console 窗口 (用户硬偏好: 流云).
+            # 仅在 Win 上加 creationflags, macOS/Linux 行为不变.
+            _spawn_kwargs = (
+                {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+                if sys.platform == "win32"
+                else {}
+            )
             try:
-                subprocess.call([*shlex.split(editor), path])
+                subprocess.call([*shlex.split(editor), path], **_spawn_kwargs)
             except Exception:
                 # Fall back to a bare invocation (editor value may not be a
                 # simple argv-splittable string on some platforms).
-                subprocess.call(f"{editor} {shlex.quote(path)}", shell=True)
+                subprocess.call(
+                    f"{editor} {shlex.quote(path)}",
+                    shell=True,
+                    **_spawn_kwargs,
+                )
             with open(path, "r", encoding="utf-8") as fh:
                 raw = fh.read()
         finally:
