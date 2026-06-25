@@ -1500,10 +1500,11 @@ def check_all_command_guards(command: str, env_type: str,
                        sudo_guess_desc, command[:200])
         return _sudo_stdin_block_result(sudo_guess_desc)
 
-    # --yolo or approvals.mode=off: bypass all approval prompts.
+    # --yolo or approvals.mode=off or auto_accept: bypass all approval prompts.
     # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
+    # auto_accept: GUI 批准弹窗不显示时, 直接放行 (1+4 fix, P-F32).
     approval_mode = _get_approval_mode()
-    if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off":
+    if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode in ("off", "auto_accept"):
         return {"approved": True, "message": None}
 
     if _command_matches_permanent_allowlist(command):
