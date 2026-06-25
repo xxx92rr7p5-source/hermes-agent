@@ -190,18 +190,45 @@ def run_oneshot(
     )
     real_stderr.flush()
 
-    # Heartbeat: write a '.' every 5s so the user knows the agent hasn't hung
+    # Heartbeat: write progress every 5s showing which tool the agent is using.
+    # Shared state updated by the tool_progress_callback inside _run_agent.
     _heartbeat_stop = _threading.Event()
     _heartbeat_count = [0]
+    _current_tool = [""]  # shared: updated by tool_progress_callback
 
     def _heartbeat():
         while not _heartbeat_stop.wait(5.0):
             _heartbeat_count[0] += 1
             try:
-                real_stderr.write(".")
+                tool = _current_tool[0]
+                if tool:
+                    real_stderr.write(f" [{tool}]")
+                else:
+                    real_stderr.write(".")
                 real_stderr.flush()
             except Exception:
                 pass
+
+    def _tool_progress(event: str, tool_name: str = "", *_args, **_kwargs):
+        """Lightweight callback: record current tool name for heartbeat display.
+
+        Called by AIAgent as: tool_progress_callback(event, tool_name, preview, args)
+        - event: "tool.started", "_thinking", "reasoning.available"
+        - tool_name: actual tool name (e.g. "read", "write_file", "web_search")
+        """
+        if event == "_thinking":
+            _current_tool[0] = "think"
+        elif event == "tool.started" and tool_name:
+            # Shorten common tool names for heartbeat display
+            short_map = {
+                "read": "read", "write_file": "write", "web_search": "search",
+                "web_fetch": "fetch", "terminal": "term", "delegate_task": "delegate",
+                "memory": "memory", "file_search": "fsearch", "grep": "grep",
+                "glob": "glob", "list_files": "ls",
+            }
+            _current_tool[0] = short_map.get(tool_name, tool_name[:8])
+        else:
+            _current_tool[0] = tool_name[:10] if tool_name else event[:10]
 
     _heartbeat_thread = _threading.Thread(target=_heartbeat, daemon=True)
     _heartbeat_thread.start()
@@ -233,6 +260,7 @@ def run_oneshot(
                     provider=provider,
                     toolsets=explicit_toolsets,
                     use_config_toolsets=use_config_toolsets,
+                    tool_progress_callback=_tool_progress,
                 )
             except BaseException as exc:  # noqa: BLE001
                 failure = exc
@@ -291,6 +319,7 @@ def _run_agent(
     provider: Optional[str] = None,
     toolsets: object = None,
     use_config_toolsets: bool = True,
+    tool_progress_callback: callable = None,
 ) -> str:
     """Build an AIAgent exactly like a normal CLI chat turn would, then
     run a single conversation.  Returns the final response string."""
@@ -399,6 +428,7 @@ def _run_agent(
         #   - dangerous-command approval → bypassed via HERMES_YOLO_MODE=1
         #   - skill secret capture → returns gracefully when no callback set
         clarify_callback=_oneshot_clarify_callback,
+        tool_progress_callback=tool_progress_callback,
     )
 
     # Belt-and-braces: make sure AIAgent doesn't invoke any streaming
