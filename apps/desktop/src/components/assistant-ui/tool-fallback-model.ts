@@ -126,6 +126,46 @@ function fileEditBasename(path: string): string {
   return normalized.split('/').filter(Boolean).pop() || normalized
 }
 
+function numericField(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key]
+
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function readFileLineLabel(args: Record<string, unknown>, result: Record<string, unknown>): string {
+  if (numericField(args, 'offset') === undefined && numericField(args, 'limit') === undefined) {
+    return ''
+  }
+
+  const content = firstStringField(result, ['content'])
+
+  const lines = content
+    .split('\n')
+    .map(line => /^(\d+)\|/.exec(line)?.[1])
+    .filter((line): line is string => !!line)
+    .map(Number)
+
+  if (lines.length > 0) {
+    const start = lines[0]!
+    const end = lines[lines.length - 1]!
+
+    return start === end ? `L${start}` : `L${start}-${end}`
+  }
+
+  const offset = numericField(args, 'offset')
+  const limit = numericField(args, 'limit')
+
+  if (offset === undefined || offset < 1) {
+    return ''
+  }
+
+  if (limit === undefined || limit <= 1) {
+    return `L${offset}`
+  }
+
+  return `L${offset}-${offset + limit - 1}`
+}
+
 const TOOL_META: Record<ToolTitleKey, ToolMetaSpec> = {
   browser_click: {
     icon: 'globe',
@@ -1528,7 +1568,11 @@ function dynamicTitle(
     const path = firstStringField(args, ['path', 'file', 'filepath'])
 
     if (path) {
-      return { title: fileEditBasename(path) }
+      const lineLabel = readFileLineLabel(args, result)
+      const target = [fileEditBasename(path), lineLabel].filter(Boolean).join(' ')
+      const action = verb(translateNow('assistant.tool.actions.reading'), translateNow('assistant.tool.actions.read'))
+
+      return { title: translateNow('assistant.tool.titleTemplates.actionTarget', action, target) }
     }
   }
 
