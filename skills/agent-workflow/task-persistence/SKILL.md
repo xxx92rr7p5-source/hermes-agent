@@ -349,6 +349,20 @@ NO FABRICATION: 改了什么 cite file:line, 没跑通就说没跑通
 | `INSTALL_POLICY` | `pnpm-lock` | B2 防御: 禁止 Coder 安装未授权的新包 |
 | `FORBIDDEN_FILES` | `[hermes_state.py, hermes_constants.py, hermes_logging.py]` | B5 防御: 禁止修改核心状态/常量/日志文件 |
 | `VISION_REQUIRED` | `false` | 是否需要截图或视觉验证 (Reviewer 审查 UI 时设为 true) |
+| `HUMAN_APPROVAL_REQUIRED` | `true` | v1.1 人审门 (28 号缺口 #1): 默认 true, Planner 出 RFC 后需流云拍板才能派 Coder |
+
+### v1.1 人审门 (28 号缺口 #1, 2026-06-25)
+
+4 派路径 (Planner → Coder → Reviewer → Archive) 强制确认节点:
+
+```
+Planner 出 RFC + tasks.md
+  ↓
+CEO 检测 HUMAN_APPROVAL_REQUIRED=true → 飞书卡片 4 按钮
+  [A 拍板] [B 改 RFC] [C 重做] [D 暂停]
+  ↓ 流云拍板
+Coder 写代码 → Reviewer 异构审查 → Archive
+```
 
 ### 5.4 飞书通道适配 (主入口)
 

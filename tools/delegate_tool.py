@@ -2101,7 +2101,8 @@ DEPENDENCIES: parents=[]
 NO FABRICATION: 没做就说没做, cite file:line, 不编 PR / id
 INSTALL_POLICY: {install_policy}
 FORBIDDEN_FILES: {forbidden_files}
-VISION_REQUIRED: {vision_required}"""
+VISION_REQUIRED: {vision_required}
+HUMAN_APPROVAL_REQUIRED: {human_approval_required}"""
 
 
 def _inject_defensive_phrase(goal: str, overrides: dict = None) -> str:
@@ -2132,6 +2133,9 @@ def _inject_defensive_phrase(goal: str, overrides: dict = None) -> str:
             'hermes_logging.py',
         ])),
         'vision_required': str(defense.get('vision_required', False)).lower(),
+        'human_approval_required': str(defense.get(
+            'human_approval_required', True
+        )).lower(),  # 28 号缺口 #1: 默认 true, 安全优先
     }
     if overrides:
         params.update(overrides)
