@@ -1832,6 +1832,9 @@ def run_conversation(
                     }
                     agent.context_compressor.update_from_response(usage_dict)
 
+                    # 1+4 体系: 每次 API 调用后检查 context 占用
+                    agent._check_context_usage(response)
+
                     # Cache discovered context length after successful call.
                     # Only persist limits confirmed by the provider (parsed
                     # from the error message), not guessed probe tiers.

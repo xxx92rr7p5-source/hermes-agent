@@ -331,6 +331,20 @@ class _StreamErrorEvent(Exception):
         }
 
 
+def _get_model_max_context(agent) -> int:
+    """从 model_metadata 读取当前模型的最大 context 长度 (1+4 体系)。"""
+    try:
+        from agent.model_metadata import get_model_metadata
+        model = getattr(agent, 'model', '')
+        if model:
+            meta = get_model_metadata(model)
+            if meta and isinstance(meta, dict) and 'max_context' in meta:
+                return int(meta['max_context'])
+    except Exception:
+        pass
+    return getattr(agent, '_model_max_context', 128000)
+
+
 class AIAgent:
     """
     AI Agent with tool calling capabilities.
@@ -502,6 +516,10 @@ class AIAgent:
             checkpoint_max_file_size_mb=checkpoint_max_file_size_mb,
             pass_session_id=pass_session_id,
         )
+
+        # 1+4 体系: context 滚动监控 (25 号 §四)
+        self._context_usage_percent = 0
+        self._model_max_context = 128000  # fallback, 实际从 model_metadata 读取
 
     def _get_session_db_for_recall(self):
         """Return a SessionDB for recall, lazily creating it if an entrypoint forgot.
@@ -699,6 +717,54 @@ class AIAgent:
                     )
         except Exception as err:
             logger.debug("LM Studio preload skipped: %s", err)
+
+    def _check_context_usage(self, response) -> None:
+        """50/70/80% 三级 context 占用监控 (1+4 体系 25 号 §四)。
+
+        50% → info 日志 (软信号)
+        70% → warning 日志 (压缩候选)
+        80% → 自动触发现有 context_compressor
+        """
+        if not (hasattr(response, 'usage') and response.usage):
+            return
+
+        # OpenAI SDK v1+ uses input_tokens; older/mocked objects
+        # may expose prompt_tokens instead.
+        usage = response.usage
+        input_tokens = getattr(usage, 'input_tokens', None)
+        if input_tokens is None:
+            input_tokens = getattr(usage, 'prompt_tokens', 0)
+        max_ctx = _get_model_max_context(self)
+        if max_ctx <= 0:
+            return
+
+        pct = int(input_tokens / max_ctx * 100)
+        self._context_usage_percent = pct
+
+        if pct >= 80:
+            logger.warning(
+                "1+4 context usage at %d%%, triggering forced compression", pct
+            )
+            try:
+                self._trigger_context_compression()
+            except Exception as exc:
+                logger.error(
+                    "1+4 context compression failed at %d%%: %s", pct, exc
+                )
+        elif pct >= 70:
+            logger.warning(
+                "1+4 context usage at %d%%, compress candidate", pct
+            )
+        elif pct >= 50:
+            logger.info("1+4 context usage at %d%%", pct)
+
+    def _trigger_context_compression(self) -> None:
+        """触发 context_compressor 压缩 (1+4 体系 80% 强制压缩)。"""
+        cc = getattr(self, 'context_compressor', None)
+        if cc is not None:
+            # Call existing compression if available
+            if hasattr(cc, 'compress'):
+                cc.compress()
 
     def switch_model(self, new_model, new_provider, api_key='', base_url='', api_mode=''):
         """Forwarder — see ``agent.agent_runtime_helpers.switch_model``."""
