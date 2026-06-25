@@ -52,6 +52,21 @@ images/
 __pycache__/
 hermes_agent.egg-info/
 wandb/
+
+# ==== 临时开发文件 (1+4 体系整理, 2026-06-25) ====
+# E2E 截图和临时脚本
+novel_e2e_*.png
+novel_e2e_*.md
+tests/novel_e2e_*.py
+tests/*_e2e.py
+test_tui_e2e.py
+
+# 临时数据和一次性脚本
+.tmp_tests/
+aihot_selected.json
+format_aihot.py
+hello-opc-fix.py
+openai_items.json
 testlogs
 
 # CLI config (may contain sensitive SSH paths)
