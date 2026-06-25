@@ -332,17 +332,43 @@ class _StreamErrorEvent(Exception):
 
 
 def _get_model_max_context(agent) -> int:
-    """从 model_metadata 读取当前模型的最大 context 长度 (1+4 体系)。"""
+    """从 model_metadata 读取当前模型的实际 context 长度 (1+4 体系)。
+
+    优先级:
+    1. context_engine 已初始化 → 直接用 engine.context_length (最准)
+    2. model_metadata 磁盘缓存 → 查模型声明的 context_length (动态)
+    3. agent 实例缓存 → _model_max_context (初始化时读取)
+    4. 返回 0 → 调用方跳过检查 (宁可不监控也不错判)
+    """
+    # 优先: context_engine 已跟踪的实际 context_length
+    engine = getattr(agent, 'context_engine', None)
+    if engine is not None:
+        ctx_len = getattr(engine, 'context_length', 0)
+        if ctx_len and ctx_len > 0:
+            return int(ctx_len)
+
+    # 次选: model_metadata 磁盘缓存
     try:
-        from agent.model_metadata import get_model_metadata
+        from agent.model_metadata import _load_model_metadata_disk_cache
         model = getattr(agent, 'model', '')
         if model:
-            meta = get_model_metadata(model)
-            if meta and isinstance(meta, dict) and 'max_context' in meta:
-                return int(meta['max_context'])
+            cache = _load_model_metadata_disk_cache()
+            if isinstance(cache, dict) and model in cache:
+                entry = cache[model]
+                if isinstance(entry, dict):
+                    ctx_len = entry.get('context_length', 0)
+                    if ctx_len and ctx_len > 0:
+                        return int(ctx_len)
     except Exception:
         pass
-    return getattr(agent, '_model_max_context', 128000)
+
+    # 兜底: agent 实例缓存
+    cached = getattr(agent, '_model_max_context', 0)
+    if cached and cached > 0:
+        return cached
+
+    # 最后的最后: 返回 0, 跳过检查
+    return 0
 
 
 class AIAgent:
@@ -519,7 +545,7 @@ class AIAgent:
 
         # 1+4 体系: context 滚动监控 (25 号 §四)
         self._context_usage_percent = 0
-        self._model_max_context = 128000  # fallback, 实际从 model_metadata 读取
+        self._model_max_context = _get_model_max_context(self)
 
     def _get_session_db_for_recall(self):
         """Return a SessionDB for recall, lazily creating it if an entrypoint forgot.
