@@ -790,12 +790,14 @@ class AIAgent:
             logger.info("1+4 context usage at %d%%", pct)
 
     def _trigger_context_compression(self) -> None:
-        """触发 context_compressor 压缩 (1+4 体系 80% 强制压缩)。"""
-        cc = getattr(self, 'context_compressor', None)
-        if cc is not None:
-            # Call existing compression if available
-            if hasattr(cc, 'compress'):
-                cc.compress()
+        """触发 context 压缩 (1+4 体系 80% 强制压缩)。
+
+        设 _pending_compression 标志, conversation_loop 在下一轮检查并
+        通过 compress_context() 完整流程执行压缩 (含 messages 收集+LLM 摘要)。
+        不直接调 compressor.compress() — 签名复杂且需要 messages 参数。
+        """
+        self._pending_compression = True
+        logger.info("1+4: flagged pending compression for next turn")
 
     def _emit_auto_handoff_notice(self, pct: int) -> None:
         """1+4 体系: 80% context 时提取 handoff + 通知 GUI 开新窗口。
@@ -5293,7 +5295,16 @@ class AIAgent:
         so users can bypass the summary-failure cooldown after an
         auto-compress abort.  Auto-compress callers use the default
         ``force=False``.
+
+        1+4 体系: 如果 _pending_compression 标志被设置 (80% context 触发),
+        自动升级为 force=True。
         """
+        # 1+4: 80% context trigger → 强制压缩
+        if getattr(self, '_pending_compression', False):
+            force = True
+            self._pending_compression = False
+            logger.info("1+4: executing forced compression (80%% trigger)")
+
         from agent.conversation_compression import compress_context
         return compress_context(
             self, messages, system_message,
