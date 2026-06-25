@@ -127,6 +127,7 @@ def run_oneshot(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     toolsets: object = None,
+    timeout_seconds: int = 300,
 ) -> int:
     """Execute a single prompt and print only the final content block.
 
@@ -137,6 +138,8 @@ def run_oneshot(
         provider: Optional provider override. Falls back to config.yaml's
             model.provider, then "auto".
         toolsets: Optional comma-separated string or iterable of toolsets.
+        timeout_seconds: Maximum runtime in seconds (default 300 = 5min).
+            Agent is forcibly killed with exit code 124 if exceeded.
 
     Returns the exit code.  Caller should sys.exit() with the return.
     """
@@ -183,7 +186,7 @@ def run_oneshot(
     prompt_len = len(prompt) if prompt else 0
     model_hint = (model or "").strip() or os.getenv("HERMES_INFERENCE_MODEL", "").strip() or "default"
     real_stderr.write(
-        f"hermes -z: running (model={model_hint}, prompt={prompt_len} chars)...\n"
+        f"hermes -z: running (model={model_hint}, prompt={prompt_len} chars, timeout={timeout_seconds}s)...\n"
     )
     real_stderr.flush()
 
@@ -203,6 +206,22 @@ def run_oneshot(
     _heartbeat_thread = _threading.Thread(target=_heartbeat, daemon=True)
     _heartbeat_thread.start()
 
+    # Timeout enforcement: kill the process if it runs too long.
+    _timed_out = [False]
+
+    def _on_timeout():
+        _timed_out[0] = True
+        try:
+            real_stderr.write(f"\nhermes -z: TIMEOUT after {timeout_seconds}s, terminating...\n")
+            real_stderr.flush()
+        except Exception:
+            pass
+        os._exit(124)  # Force-kill the process (same exit code as `timeout` command)
+
+    _timeout_timer = _threading.Timer(timeout_seconds, _on_timeout)
+    _timeout_timer.daemon = True
+    _timeout_timer.start()
+
     response: Optional[str] = None
     failure: BaseException | None = None
     try:
@@ -218,6 +237,7 @@ def run_oneshot(
             except BaseException as exc:  # noqa: BLE001
                 failure = exc
     finally:
+        _timeout_timer.cancel()
         _heartbeat_stop.set()
         try:
             devnull.close()

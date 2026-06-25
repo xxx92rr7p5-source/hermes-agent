@@ -13196,6 +13196,7 @@ def main():
                 model=getattr(args, "model", None),
                 provider=getattr(args, "provider", None),
                 toolsets=getattr(args, "toolsets", None),
+                timeout_seconds=getattr(args, "timeout", 300),
             )
         )
 

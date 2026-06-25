@@ -142,6 +142,14 @@ def build_top_level_parser():
         help="Comma-separated toolsets to enable for this invocation. Applies to -z/--oneshot and --tui.",
     )
     parser.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        metavar="SECONDS",
+        help="Maximum runtime for -z/--oneshot mode (default: 300s = 5min). "
+             "Agent will be killed if it exceeds this limit.",
+    )
+    parser.add_argument(
         "--resume",
         "-r",
         metavar="SESSION",
