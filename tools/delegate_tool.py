@@ -30,6 +30,7 @@ from concurrent.futures import (
 )
 from typing import Any, Dict, List, Optional
 
+from agent.handoff import extract_handoff
 from toolsets import TOOLSETS
 
 # Sentinel value used by the runtime provider system for providers that are
@@ -1768,6 +1769,7 @@ def _run_single_child(
                 "duration_seconds": duration,
                 "_child_role": getattr(child, "_delegate_role", None),
                 "diagnostic_path": diagnostic_path,
+                "handoff": {},
             }
         finally:
             # Shut down executor without waiting — if the child thread
@@ -1787,6 +1789,10 @@ def _run_single_child(
         completed = result.get("completed", False)
         interrupted = result.get("interrupted", False)
         api_calls = result.get("api_calls", 0)
+
+        # 1+4 体系 D1+D2: 从子 agent final_response 提取 handoff
+        # 父 context 只收 handoff dict, 不收 raw stdout
+        handoff = extract_handoff(summary)
 
         if interrupted:
             status = "interrupted"
@@ -1881,6 +1887,8 @@ def _run_single_child(
                 )
                 else 0.0
             ),
+            # 1+4 体系 D1+D2: handoff 强制压缩 — 父 context 只收 handoff dict
+            "handoff": handoff,
         }
         if status == "failed":
             entry["error"] = result.get("error", "Subagent did not produce a response.")
@@ -2003,6 +2011,7 @@ def _run_single_child(
             "api_calls": 0,
             "duration_seconds": duration,
             "_child_role": getattr(child, "_delegate_role", None),
+            "handoff": {},
         }
 
     finally:
