@@ -2053,6 +2053,8 @@ export const zh: Translations = {
       gatewayDisconnected: 'Hermes 网关未连接',
       sendFailed: '无法发送澄清响应',
       loadingQuestion: '正在加载问题…',
+      timedOutNote:
+        'Hermes 提出了此问题但未找到实时请求——会话可能已被刷新或请求已超时。请尝试刷新页面，或发送新消息继续对话。',
       other: '其他 (输入你的答案)',
       placeholder: '输入你的答案…',
       shortcutSuffix: ' 发送',

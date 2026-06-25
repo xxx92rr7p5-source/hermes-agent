@@ -258,6 +258,17 @@ import json
 import shutil
 import stat
 import subprocess
+
+# ---------------------------------------------------------------------------
+# Install the global subprocess patch BEFORE any other hermes_cli imports.
+# This ensures EVERY subprocess.Popen / subprocess.run / subprocess.call on
+# Windows automatically gets CREATE_NO_WINDOW (no console flash), unless the
+# caller explicitly passes its own creationflags.
+# ---------------------------------------------------------------------------
+from hermes_cli._subprocess_compat import install_global_subprocess_patch
+
+install_global_subprocess_patch()
+
 from pathlib import Path
 from typing import Optional
 

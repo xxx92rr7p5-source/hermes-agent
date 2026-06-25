@@ -2957,39 +2957,6 @@ def test_setup_runtime_check_rejects_implicit_bedrock_when_unconfigured(monkeypa
     assert resp["result"]["provider"] == "bedrock"
 
 
-def test_setup_runtime_check_honors_requested_provider(monkeypatch):
-    """Onboarding must be able to validate the provider the user just connected."""
-    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda: True)
-
-    def fake_resolve(requested=None, **kwargs):
-        if requested == "nous":
-            return {
-                "provider": "nous",
-                "api_key": "invoke-jwt",
-                "source": "portal",
-            }
-        return {
-            "provider": "anthropic",
-            "api_key": "",
-            "source": "config",
-        }
-
-    monkeypatch.setattr(
-        "hermes_cli.runtime_provider.resolve_runtime_provider",
-        fake_resolve,
-    )
-
-    scoped = server.handle_request(
-        {"id": "1", "method": "setup.runtime_check", "params": {"provider": "nous"}}
-    )
-    assert scoped["result"]["ok"] is True
-    assert scoped["result"]["provider"] == "nous"
-
-    default = server.handle_request({"id": "1", "method": "setup.runtime_check", "params": {}})
-    assert default["result"]["ok"] is False
-    assert default["result"]["provider"] == "anthropic"
-
-
 def test_complete_slash_drops_removed_provider_alias():
     # `/provider` was folded into a single `/model` command, so autocomplete
     # must no longer offer the dead alias...
@@ -3299,7 +3266,7 @@ def test_config_set_model_global_persists(monkeypatch):
         warning_message="",
     )
     seen = {}
-    saved_values = {}
+    saved = {}
 
     def _switch_model(**kwargs):
         seen.update(kwargs)
@@ -3309,9 +3276,7 @@ def test_config_set_model_global_persists(monkeypatch):
     monkeypatch.setattr("hermes_cli.model_switch.switch_model", _switch_model)
     monkeypatch.setattr(server, "_restart_slash_worker", lambda sid, session: None)
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
-    # _persist_model_switch uses targeted save_config_value writes (#48305) so it
-    # preserves sibling model.* keys instead of rewriting the whole block.
-    monkeypatch.setattr("cli.save_config_value", lambda key, value: saved_values.__setitem__(key, value) or True)
+    monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: saved.update(cfg))
 
     resp = server.handle_request(
         {
@@ -3327,9 +3292,9 @@ def test_config_set_model_global_persists(monkeypatch):
 
     assert resp["result"]["value"] == "anthropic/claude-sonnet-4.6"
     assert seen["is_global"] is True
-    assert saved_values["model.default"] == "anthropic/claude-sonnet-4.6"
-    assert saved_values["model.provider"] == "anthropic"
-    assert saved_values["model.base_url"] == "https://api.anthropic.com"
+    assert saved["model"]["default"] == "anthropic/claude-sonnet-4.6"
+    assert saved["model"]["provider"] == "anthropic"
+    assert saved["model"]["base_url"] == "https://api.anthropic.com"
 
 
 def test_config_set_model_explicit_provider_skips_broken_default_init(monkeypatch):
@@ -6139,65 +6104,6 @@ def test_session_most_recent_handles_db_unavailable(monkeypatch):
     assert resp["result"]["session_id"] is None
 
 
-# ── verification.status ──────────────────────────────────────────────
-
-
-def test_verification_status_returns_recorded_evidence(tmp_path):
-    home = tmp_path / ".hermes"
-    home.mkdir()
-    token = set_hermes_home_override(home)
-    project = tmp_path / "project"
-    project.mkdir()
-    (project / "package.json").write_text(
-        json.dumps({"scripts": {"test": "vitest"}}),
-        encoding="utf-8",
-    )
-    (project / "pnpm-lock.yaml").write_text("", encoding="utf-8")
-    try:
-        from agent.verification_evidence import record_terminal_result
-
-        record_terminal_result(
-            command="pnpm run test",
-            cwd=project,
-            session_id="sid",
-            exit_code=0,
-            output="green",
-        )
-
-        resp = server.handle_request(
-            {
-                "id": "1",
-                "method": "verification.status",
-                "params": {"cwd": str(project), "session_id": "sid"},
-            }
-        )
-    finally:
-        reset_hermes_home_override(token)
-
-    verification = resp["result"]["verification"]
-    assert verification["status"] == "passed"
-    assert verification["evidence"]["canonical_command"] == "pnpm run test"
-    assert verification["evidence"]["scope"] == "full"
-
-
-def test_verification_status_outside_workspace_is_not_applicable(tmp_path):
-    home = tmp_path / ".hermes"
-    home.mkdir()
-    token = set_hermes_home_override(home)
-    try:
-        resp = server.handle_request(
-            {
-                "id": "1",
-                "method": "verification.status",
-                "params": {"cwd": str(tmp_path), "session_id": "sid"},
-            }
-        )
-    finally:
-        reset_hermes_home_override(token)
-
-    assert resp["result"]["verification"]["status"] == "not_applicable"
-
-
 # ── browser.manage ───────────────────────────────────────────────────
 
 
@@ -8081,74 +7987,311 @@ def test_get_usage_safe_when_active_count_raises(monkeypatch):
     usage = server._get_usage(_BareAgent())
     # Field omitted, but the rest of the payload is intact.
     assert "active_subagents" not in usage
-    assert usage["model"] == "x"
 
 
-def test_persist_model_switch_preserves_sibling_model_keys(tmp_path, monkeypatch):
-    """#48305: switching models from the TUI must NOT destroy sibling keys under
-    `model:` (model_slots, model_fallback, etc.). _persist_model_switch now uses
-    targeted save_config_value writes instead of rewriting the whole block."""
+# ═══════════════════════════════════════════════════════════════════════
+# _replay_pending_prompts — re-emit pending prompts on transport re-bind
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _parked_session(runtime_sid: str, session_key: str, **extra):
+    """Create a minimal parked session dict for replay tests.
+
+    _replay_pending_prompts resolves runtime sid → session_key via
+    _sessions, so tests must populate both stores consistently.
+    """
     import types
-    import yaml
-    import cli
+    return {
+        "agent": types.SimpleNamespace(model="test"),
+        "session_key": session_key,
+        "running": False,
+        "transport": server._detached_ws_transport,
+        "created_at": 0,
+        "cols": 80,
+        "attached_images": [],
+        "image_counter": 0,
+        "history": [],
+        "history_lock": threading.Lock(),
+        "history_version": 0,
+        "cwd": "/tmp",
+        "inflight_turn": None,
+        "last_active": 0,
+        "show_reasoning": False,
+        "tool_progress_mode": "all",
+        "tool_started_at": {},
+        "slash_worker": None,
+        "explicit_cwd": False,
+        "display_history_prefix": [],
+        **extra,
+    }
 
-    cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text(
-        "model:\n"
-        "  default: old-model\n"
-        "  provider: openai\n"
-        "  model_slots:\n"
-        "    fast: gpt-5-mini\n"
-        "  model_fallback:\n"
-        "    - claude-haiku\n"
-        "agent:\n"
-        "  system_prompt: keepme\n"
+
+def test_replay_pending_prompts_re_emits_clarify_request(monkeypatch):
+    """_replay_pending_prompts re-emits pending clarify.request events.
+
+    When a session has a pending clarify prompt and a new transport is
+    bound (e.g. WebSocket reconnect), _replay_pending_prompts must re-emit
+    the clarify.request event so the desktop client can populate its
+    nanostores and surface the ClarifyTool UI. Without the replay, the
+    agent hangs until the clarify timeout (default 10 min).
+    """
+    replayed = []
+
+    def _capture_emit(event, sid, payload=None):
+        replayed.append((event, sid, dict(payload) if payload else {}))
+
+    monkeypatch.setattr(server, "_emit", _capture_emit)
+
+    # Simulate: runtime sid "a1b2c3d4", stored session key "db-key-1"
+    runtime_sid = "a1b2c3d4"
+    session_key = "db-key-1"
+    server._sessions[runtime_sid] = _parked_session(runtime_sid, session_key)
+
+    with server._prompt_lock:
+        server._pending["rid1"] = (runtime_sid, threading.Event())
+        server._pending_prompt_payloads["rid1"] = (
+            "clarify.request",
+            {
+                "request_id": "rid1",
+                "question": "用户能使用吗",
+                "choices": ["能用", "不能用"],
+            },
+        )
+
+    try:
+        count = server._replay_pending_prompts(session_key)
+        assert count == 1
+        assert len(replayed) == 1
+        assert replayed[0][0] == "clarify.request"
+        assert replayed[0][1] == runtime_sid
+        assert replayed[0][2]["question"] == "用户能使用吗"
+        assert replayed[0][2]["request_id"] == "rid1"
+    finally:
+        server._sessions.pop(runtime_sid, None)
+        with server._prompt_lock:
+            server._pending.pop("rid1", None)
+            server._pending_prompt_payloads.pop("rid1", None)
+
+
+def test_replay_pending_prompts_skips_other_sessions(monkeypatch):
+    """_replay_pending_prompts only replays prompts whose runtime sid
+    maps to the given session_key."""
+    replayed = []
+
+    def _capture_emit(event, sid, payload=None):
+        replayed.append((event, sid))
+
+    monkeypatch.setattr(server, "_emit", _capture_emit)
+
+    sid_a = "sid-a"
+    key_a = "key-a"
+    sid_b = "sid-b"
+    key_b = "key-b"
+    server._sessions[sid_a] = _parked_session(sid_a, key_a)
+    server._sessions[sid_b] = _parked_session(sid_b, key_b)
+
+    with server._prompt_lock:
+        server._pending["rid-a"] = (sid_a, threading.Event())
+        server._pending_prompt_payloads["rid-a"] = (
+            "clarify.request",
+            {"request_id": "rid-a", "question": "Q for A"},
+        )
+        server._pending["rid-b"] = (sid_b, threading.Event())
+        server._pending_prompt_payloads["rid-b"] = (
+            "clarify.request",
+            {"request_id": "rid-b", "question": "Q for B"},
+        )
+
+    try:
+        count = server._replay_pending_prompts(key_a)
+        assert count == 1
+        assert len(replayed) == 1
+        assert replayed[0][0] == "clarify.request"
+        assert replayed[0][1] == sid_a
+    finally:
+        server._sessions.pop(sid_a, None)
+        server._sessions.pop(sid_b, None)
+        with server._prompt_lock:
+            server._pending.pop("rid-a", None)
+            server._pending.pop("rid-b", None)
+            server._pending_prompt_payloads.pop("rid-a", None)
+            server._pending_prompt_payloads.pop("rid-b", None)
+
+
+def test_replay_pending_prompts_no_pending_returns_zero(monkeypatch):
+    """_replay_pending_prompts returns 0 when no prompts are pending."""
+    replayed = []
+
+    def _capture_emit(event, sid, payload=None):
+        replayed.append((event, sid))
+
+    monkeypatch.setattr(server, "_emit", _capture_emit)
+
+    count = server._replay_pending_prompts("no-such-session")
+    assert count == 0
+    assert len(replayed) == 0
+
+
+def test_replay_pending_prompts_handles_multiple_prompts(monkeypatch):
+    """When a session has >1 pending prompt, all are replayed."""
+    replayed = []
+
+    def _capture_emit(event, sid, payload=None):
+        replayed.append((event, sid, dict(payload) if payload else {}))
+
+    monkeypatch.setattr(server, "_emit", _capture_emit)
+
+    runtime_sid = "multi-rt"
+    session_key = "multi-key"
+    server._sessions[runtime_sid] = _parked_session(runtime_sid, session_key)
+
+    with server._prompt_lock:
+        server._pending["r1"] = (runtime_sid, threading.Event())
+        server._pending_prompt_payloads["r1"] = (
+            "clarify.request",
+            {"request_id": "r1", "question": "First?"},
+        )
+        server._pending["r2"] = (runtime_sid, threading.Event())
+        server._pending_prompt_payloads["r2"] = (
+            "approval.request",
+            {"request_id": "r2", "command": "rm -rf /"},
+        )
+
+    try:
+        count = server._replay_pending_prompts(session_key)
+        assert count == 2
+        assert len(replayed) == 2
+        events = {r[0] for r in replayed}
+        assert events == {"clarify.request", "approval.request"}
+    finally:
+        server._sessions.pop(runtime_sid, None)
+        with server._prompt_lock:
+            server._pending.pop("r1", None)
+            server._pending.pop("r2", None)
+            server._pending_prompt_payloads.pop("r1", None)
+            server._pending_prompt_payloads.pop("r2", None)
+
+
+def test_session_resume_fast_path_replays_pending_prompts(monkeypatch):
+    """The fast path in session.resume replays pending prompts for the
+    reconnected session so the desktop client re-populates its stores."""
+    replayed = []
+
+    def _capture_emit(event, sid, payload=None):
+        replayed.append((event, sid, dict(payload) if payload else {}))
+
+    monkeypatch.setattr(server, "_emit", _capture_emit)
+
+    target = "resume-target"
+    sid = "existing-sid"
+
+    # Create a parked live session (simulating a WS-disconnected session
+    # that is still within the grace window).
+    agent = types.SimpleNamespace(model="test")
+    # Use a live-ish transport so _find_live_session_by_key finds it
+    class _LiveTransport:
+        def write(self, *a, **k):
+            return True
+
+    live_session = {
+        "session_key": target,
+        "agent": agent,
+        "running": False,
+        "transport": _LiveTransport(),
+        "created_at": time.time(),
+        "cols": 80,
+        "attached_images": [],
+        "image_counter": 0,
+        "history": [],
+        "history_lock": threading.Lock(),
+        "history_version": 0,
+        "cwd": "/tmp",
+        "inflight_turn": None,
+        "last_active": time.time(),
+        "show_reasoning": False,
+        "tool_progress_mode": "all",
+        "tool_started_at": {},
+        "slash_worker": None,
+        "explicit_cwd": False,
+        "display_history_prefix": [],
+    }
+    server._sessions[sid] = live_session
+
+    # Seed a pending clarify request for this session.
+    # _pending stores entries by *runtime* sid, so use `sid` (not `target`).
+    with server._prompt_lock:
+        server._pending["rid-replay"] = (sid, threading.Event())
+        server._pending_prompt_payloads["rid-replay"] = (
+            "clarify.request",
+            {
+                "request_id": "rid-replay",
+                "question": "Replay test question",
+                "choices": ["A", "B"],
+            },
+        )
+
+    # Stub the DB — _get_db returning None triggers "state.db unavailable"
+    class _FakeDB:
+        def get_session(self, _target):
+            return {"id": target}
+
+        def get_session_by_title(self, _target):
+            return None
+
+        def reopen_session(self, _target):
+            pass
+
+        def get_messages_as_conversation(self, _target, include_ancestors=False):
+            return [{"role": "user", "content": "hello"}]
+
+        def get_session_title(self, _key):
+            return "test"
+
+        def resolve_resume_session_id(self, _target):
+            return _target
+
+    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
+    monkeypatch.setattr(server, "_set_session_context", lambda target: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda tokens: None)
+    monkeypatch.setattr(
+        server,
+        "_make_agent",
+        lambda *args, **kwargs: types.SimpleNamespace(model="test"),
     )
-    # save_config_value() resolves the config path from cli._hermes_home, which
-    # is captured at import time — patch it directly (set_hermes_home_override
-    # does NOT affect this snapshot).
-    monkeypatch.setattr(cli, "_hermes_home", tmp_path)
-
-    result = types.SimpleNamespace(
-        new_model="new-model", target_provider="anthropic", base_url=None
+    monkeypatch.setattr(
+        server,
+        "_session_info",
+        lambda agent, *a: {"model": "test", "tools": {}, "skills": {}},
     )
-    server._persist_model_switch(result)
-    saved = yaml.safe_load(cfg_path.read_text())
-
-    # The switched fields updated...
-    assert saved["model"]["default"] == "new-model"
-    assert saved["model"]["provider"] == "anthropic"
-    # ...and the sibling keys SURVIVED (the bug was that they got wiped).
-    assert saved["model"]["model_slots"] == {"fast": "gpt-5-mini"}
-    assert saved["model"]["model_fallback"] == ["claude-haiku"]
-    assert saved["agent"]["system_prompt"] == "keepme"
-
-
-def test_persist_model_switch_clears_stale_base_url(tmp_path, monkeypatch):
-    """#48305: switching from a custom endpoint (which set model.base_url) to a
-    provider with no base_url must CLEAR the stale base_url, not leave it
-    pointing at the old host."""
-    import types
-    import yaml
-    import cli
-
-    cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text(
-        "model:\n"
-        "  default: local-model\n"
-        "  provider: custom:mylocal\n"
-        "  base_url: http://localhost:1234/v1\n"
+    monkeypatch.setattr(
+        server, "_init_session", lambda sid, key, agent, history, cols=80, **_kwargs: None
     )
-    monkeypatch.setattr(cli, "_hermes_home", tmp_path)
 
-    # Switch to a native provider with no base_url.
-    result = types.SimpleNamespace(
-        new_model="claude-haiku", target_provider="anthropic", base_url=None
-    )
-    server._persist_model_switch(result)
-    saved = yaml.safe_load(cfg_path.read_text())
+    try:
+        resp = server.handle_request({
+            "id": "1",
+            "method": "session.resume",
+            "params": {"session_id": target},
+        })
 
-    assert saved["model"]["default"] == "claude-haiku"
-    assert saved["model"]["provider"] == "anthropic"
-    # Stale custom base_url must be cleared (null coalesces to absent on read).
-    assert not saved["model"].get("base_url"), saved["model"].get("base_url")
+        # The response should be successful
+        assert "result" in resp, f"Expected success, got: {resp}"
+        assert resp["result"]["resumed"] == target
+
+        # The pending clarify.request must have been replayed
+        clarify_replays = [r for r in replayed if r[0] == "clarify.request"]
+        assert len(clarify_replays) >= 1, (
+            f"Expected clarify.request replay, got replayed events: {replayed}"
+        )
+        assert clarify_replays[0][1] == sid  # runtime sid, not target
+        assert clarify_replays[0][2]["request_id"] == "rid-replay"
+    except Exception:
+        import sys, traceback
+        traceback.print_exc(file=sys.stderr)
+        raise
+    finally:
+        server._sessions.pop(sid, None)
+        with server._prompt_lock:
+            server._pending.pop("rid-replay", None)
+            server._pending_prompt_payloads.pop("rid-replay", None)

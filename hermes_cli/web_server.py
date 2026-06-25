@@ -2383,7 +2383,8 @@ def _spawn_hermes_action(subcommand: List[str], name: str) -> subprocess.Popen:
     }
     if sys.platform == "win32":
         popen_kwargs["creationflags"] = (
-            subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+            getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            | subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
             | getattr(subprocess, "DETACHED_PROCESS", 0)
         )
     else:

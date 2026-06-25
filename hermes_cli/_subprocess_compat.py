@@ -201,6 +201,88 @@ def windows_hide_flags() -> int:
     return _CREATE_NO_WINDOW
 
 
+def install_global_subprocess_patch() -> None:
+    """Install a global monkey-patch on ``subprocess.Popen`` so that every
+    ``subprocess.Popen`` / ``subprocess.run`` / ``subprocess.call`` call
+    on Windows automatically gets ``CREATE_NO_WINDOW`` (0x08000000) when no
+    explicit ``creationflags`` is passed.
+
+    This is a **belt-and-braces** measure: callers that already pass
+    ``creationflags`` (e.g. :func:`windows_detach_flags`,
+    :func:`windows_hide_flags`, or gateway_windows detach helpers) are
+    **not** affected — their explicit flags are preserved unchanged.
+
+    The patch is idempotent (calling it twice is safe) and a no-op on
+    non-Windows platforms.
+
+    Without this patch, every bare ``subprocess.run(["git", "status"])``
+    or ``subprocess.Popen(["python", ...])`` on Windows briefly flashes a
+    console window because the child is a console-subsystem binary.  With
+    it, those flashes are suppressed globally — callers don't need to
+    remember to sprinkle ``creationflags`` everywhere.
+
+    Design rationale (why not fix every call site individually):
+    ``main.py`` alone has 93+ ``subprocess.run/call/check_*`` calls.
+    Across all of ``hermes_cli`` the count exceeds 200.  A global patch
+    gives us a **default-safe** posture: every call is quiet by default;
+    the few callers that genuinely want a console window (e.g. user-facing
+    terminal launch) can still pass ``creationflags=0`` explicitly.
+    """
+    if not IS_WINDOWS:
+        return
+
+    import subprocess as _sp
+
+    _OriginalPopen = _sp.Popen
+
+    # Guard against double-patching (idempotent).
+    if getattr(_OriginalPopen, "_hermes_no_window_patched", False):
+        return
+
+    # Diagnostic: write a marker so we can confirm the patch loaded.
+    import os as _os
+    import time as _time
+    _diag_dir = _os.path.join(_os.path.expanduser("~"), ".hermes", "logs")
+    try:
+        _os.makedirs(_diag_dir, exist_ok=True)
+        _diag_path = _os.path.join(_diag_dir, "subprocess_patch.log")
+        with open(_diag_path, "a", encoding="utf-8") as _f:
+            _f.write(
+                f"{_time.strftime('%Y-%m-%dT%H:%M:%S')} "
+                f"PATCH_LOADED pid={_os.getpid()}\n"
+            )
+    except Exception:
+        pass  # Best-effort diagnostic — never crash.
+
+    class _NoWindowPopen(_OriginalPopen):
+        """Popen subclass that injects CREATE_NO_WINDOW by default."""
+
+        def __init__(self, *args, **kwargs):
+            _had_cf = "creationflags" in kwargs
+            if not _had_cf:
+                kwargs["creationflags"] = _CREATE_NO_WINDOW
+            # Diagnostic: log every spawn so we can trace the flash source.
+            try:
+                _cmd = args[0] if args else kwargs.get("args", "<unknown>")
+                _cmd_str = (
+                    " ".join(_cmd)
+                    if isinstance(_cmd, (list, tuple))
+                    else str(_cmd)
+                )
+                with open(_diag_path, "a", encoding="utf-8") as _f:
+                    _f.write(
+                        f"{_time.strftime('%Y-%m-%dT%H:%M:%S')} "
+                        f"SPAWN had_cf={_had_cf} cf=0x{kwargs['creationflags']:08X} "
+                        f"cmd={_cmd_str[:300]}\n"
+                    )
+            except Exception:
+                pass
+            super().__init__(*args, **kwargs)
+
+    _NoWindowPopen._hermes_no_window_patched = True  # type: ignore[attr-defined]
+    _sp.Popen = _NoWindowPopen  # type: ignore[assignment]
+
+
 def windows_detach_popen_kwargs() -> dict:
     """Return a dict of Popen kwargs that detach a child on Windows and
     fall back to the POSIX equivalent (``start_new_session=True``) on

@@ -60,6 +60,51 @@ function buildSessionWindowUrl(sessionId, { devServer, rendererIndexPath, watch,
 // spawning a duplicate, and a window removes itself from the registry when it
 // closes. The actual BrowserWindow construction is injected (the `factory`) so
 // this module stays free of Electron and is unit-testable.
+// Parse a hermes:// deep link of kind "window" into the structured command
+// the main process needs to act on it. Pure (no Electron), so it can be
+// unit-tested with node --test.
+//
+//   hermes://window/session/<id>?watch=1
+//     -> { kind: 'session', sessionId: '<id>', watch: <bool> }
+//   hermes://window/new
+//     -> { kind: 'new' }
+//   hermes://blueprint/foo      (or any other kind)
+//     -> { kind: null }   // not a window deep link
+//
+// `watch` is only meaningful for `kind: 'session'`. `sessionId` is
+// URL-decoded and trimmed; an empty value still parses (the main process
+// decides what to do with it).
+function parseWindowDeepLink(url) {
+  if (!url || typeof url !== 'string') return { kind: null }
+
+  let parsed
+  try {
+    parsed = new URL(url)
+  } catch {
+    return { kind: null }
+  }
+
+  if ((parsed.protocol || '').replace(/:$/, '') !== 'hermes') return { kind: null }
+  if ((parsed.hostname || '') !== 'window') return { kind: null }
+
+  // host="window", path="/session/<id>" or "/new"
+  const name = decodeURIComponent((parsed.pathname || '').replace(/^\//, ''))
+  const parts = name.split('/')
+  const action = parts[0]
+
+  if (action === 'session') {
+    const sessionId = parts.slice(1).join('/').trim()
+    const watch = parsed.searchParams.get('watch') === '1' || parsed.searchParams.get('watch') === 'true'
+    return { kind: 'session', sessionId, watch }
+  }
+
+  if (action === 'new') {
+    return { kind: 'new' }
+  }
+
+  return { kind: null }
+}
+
 function createSessionWindowRegistry() {
   const windows = new Map()
 
@@ -119,6 +164,7 @@ module.exports = {
   buildSessionWindowUrl,
   chatWindowWebPreferences,
   createSessionWindowRegistry,
+  parseWindowDeepLink,
   SESSION_WINDOW_MIN_HEIGHT,
   SESSION_WINDOW_MIN_WIDTH
 }

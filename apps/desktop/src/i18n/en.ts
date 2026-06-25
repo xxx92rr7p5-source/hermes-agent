@@ -1878,6 +1878,8 @@ export const en: Translations = {
       gatewayDisconnected: 'Hermes gateway is not connected',
       sendFailed: 'Could not send clarify response',
       loadingQuestion: 'Loading question…',
+      timedOutNote:
+        'Hermes asked this question but the live request was not found — the session may have been refreshed or the request timed out. Try refreshing the page, or start a new message to continue.',
       other: 'Other (type your answer)',
       placeholder: 'Type your answer…',
       shortcutSuffix: ' to send',

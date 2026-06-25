@@ -620,6 +620,14 @@ export function useMainApp(gw: GatewayClient) {
 
       rpc<ClarifyRespondResponse>('clarify.respond', { answer, request_id: clarify.requestId }).then(r => {
         if (!r) {
+          // RPC returned an error envelope (e.g. 4009 "no pending answer request"
+          // when the server already consumed the prompt via timeout / cancel).
+          // Don't surface the error message as user input — just clear the
+          // overlay so the composer is unblocked and continue with the abandoned
+          // prompt path so the question stays visible in the transcript.
+          sys(formatAbandonedClarify(clarify.question, clarify.choices, 'expired'))
+          patchOverlayState({ clarify: null })
+
           return
         }
 
@@ -643,6 +651,14 @@ export function useMainApp(gw: GatewayClient) {
           })
         }
 
+        patchOverlayState({ clarify: null })
+      }).catch((e: unknown) => {
+        // Network failure or RPC error (e.g. 4009) — clear the overlay so the
+        // composer isn't stuck waiting on a prompt the server no longer has,
+        // and surface the error in the activity feed instead of letting the
+        // raw message bubble into the next user turn.
+        sys(`clarify expired: ${rpcErrorMessage(e)}`)
+        sys(formatAbandonedClarify(clarify.question, clarify.choices, 'expired'))
         patchOverlayState({ clarify: null })
       })
     },
@@ -883,8 +899,19 @@ export function useMainApp(gw: GatewayClient) {
   slashRef.current = slash
 
   const respondWith = useCallback(
-    (method: string, params: Record<string, unknown>, done: () => void) => rpc(method, params).then(r => r && done()),
-    [rpc]
+    (method: string, params: Record<string, unknown>, done: () => void) =>
+      rpc(method, params).then(r => r && done()).catch((e: unknown) => {
+        // The 5 respond-with methods (approval/sudo/secret/clarify/terminal.read)
+        // can return 4009 "no pending answer request" when the server already
+        // consumed the prompt (timeout, cancel, transport re-bind). When that
+        // happens the overlay must still clear so the composer is unblocked —
+        // we can't surface the error message as a system line because that
+        // path is what originally funneled the error text into the next user
+        // turn. Done() is intentionally NOT called: from the caller's POV the
+        // overlay already cleared on its own (handled by the callers below).
+        sys(`rpc error: ${rpcErrorMessage(e)}`)
+      }),
+    [rpc, sys]
   )
 
   const answerApproval = useCallback(

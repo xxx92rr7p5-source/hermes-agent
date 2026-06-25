@@ -269,6 +269,7 @@ class _SlashWorker:
             bufsize=1,
             cwd=os.getcwd(),
             env=os.environ.copy(),
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
         threading.Thread(target=self._drain_stdout, daemon=True).start()
         threading.Thread(target=self._drain_stderr, daemon=True).start()
@@ -1644,6 +1645,50 @@ def _clear_pending(sid: str | None = None) -> None:
             if sid is None or owner_sid == sid:
                 _answers[rid] = ""
                 ev.set()
+
+
+def _replay_pending_prompts(session_key: str) -> int:
+    """Re-emit pending prompt events for *session_key* after transport re-bind.
+
+    When a WebSocket client reconnects (page refresh, desktop restart), the
+    session is resumed and a fresh transport is bound — but any pending
+    ``clarify.request``, ``approval.request``, ``secret.request``, or
+    ``terminal.read.request`` event was a one-shot emission to the OLD
+    transport and is never re-sent.  The agent thread is still blocked on
+    the corresponding ``threading.Event``, so without a replay the new
+    client never sees the prompt and the agent hangs until its timeout
+    (default 5-10 minutes for clarify, 5 minutes for approval).
+
+    *session_key* is the stored (DB) session key.  ``_pending`` entries are
+    indexed by *runtime* session id (the 8-char hex ``sid``), so we resolve
+    through ``_sessions``: for every runtime sid that has pending prompts,
+    check whether its ``session_key`` matches *session_key*.
+
+    Returns the count of replayed events.
+    """
+    replayed = 0
+    with _prompt_lock:
+        for rid, (owner_sid, _ev) in list(_pending.items()):
+            # Resolve runtime sid → stored session_key via the live session
+            # registry.  A pending prompt always belongs to a session that
+            # is still parked in _sessions (otherwise _clear_pending would
+            # have already released it).
+            session = _sessions.get(owner_sid)
+            if session is None:
+                continue
+            if session.get("session_key") != session_key:
+                continue
+            entry = _pending_prompt_payloads.get(rid)
+            if entry is None:
+                continue
+            event, payload = entry
+            # Re-emit to the currently bound transport; if there is no
+            # transport yet the caller should have arranged one — the
+            # emit is a no-op on a DropTransport, which is fine because
+            # a transport-less session can't show prompts anyway.
+            _emit(event, owner_sid, dict(payload))
+            replayed += 1
+    return replayed
 
 
 # ── Agent factory ────────────────────────────────────────────────────
@@ -4778,6 +4823,7 @@ def _(rid, params: dict) -> dict:
     with _session_resume_lock:
         live = _find_live_session_by_key(target)
         if live is not None:
+            _replay_pending_prompts(target)
             return _ok(rid, _reuse_live_payload(*live))
 
     # Lazy/watch resume: register the live session WITHOUT building an agent.
@@ -4816,6 +4862,7 @@ def _(rid, params: dict) -> dict:
             if live is not None:
                 if lease is not None:
                     lease.release()
+                _replay_pending_prompts(target)
                 return _ok(rid, _reuse_live_payload(*live))
             with _sessions_lock:
                 _sessions[sid] = {
@@ -4853,6 +4900,7 @@ def _(rid, params: dict) -> dict:
                     "transport": current_transport() or _stdio_transport,
                 }
                 _register_session_cwd(_sessions[sid])
+        _replay_pending_prompts(target)
         return _ok(
             rid,
             {
@@ -4947,6 +4995,7 @@ def _(rid, params: dict) -> dict:
                 transport=current_transport() or _stdio_transport,
             )
             payload["resumed"] = target
+            _replay_pending_prompts(target)
             return _ok(rid, payload)
         try:
             init_home_token = (
@@ -4984,6 +5033,7 @@ def _(rid, params: dict) -> dict:
                 lease.release()
             return _err(rid, 5000, f"resume failed: {e}")
         session = _sessions.get(sid) or {}
+    _replay_pending_prompts(target)
     return _ok(
         rid,
         {
@@ -8912,7 +8962,19 @@ def _respond(rid, params, key):
     with _prompt_lock:
         entry = _pending.get(r)
         if not entry:
-            return _err(rid, 4009, f"no pending {key} request")
+            # Include the truncated request_id so users / logs can distinguish
+            # "UI sent a stale id for a prompt the server already consumed
+            # (timeout/cancel/re-bind)" from "UI sent a never-existed id".
+            # Both currently collapse into the same 4009 envelope, which makes
+            # it hard to tell whether the bug is on the server (lost prompt)
+            # or the UI (stale state). The 8-char prefix matches what
+            # _block() emits as `rid`, so a match here means "prompt was real".
+            rid_prefix = r[:8] if isinstance(r, str) and len(r) >= 8 else (r or "<empty>")
+            return _err(
+                rid,
+                4009,
+                f"no pending {key} request (id={rid_prefix})",
+            )
         _, ev = entry
         _answers[r] = params.get(key, "")
         ev.set()

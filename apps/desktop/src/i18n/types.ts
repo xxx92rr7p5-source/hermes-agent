@@ -1537,6 +1537,7 @@ export interface Translations {
       gatewayDisconnected: string
       sendFailed: string
       loadingQuestion: string
+      timedOutNote: string
       other: string
       placeholder: string
       shortcutSuffix: string

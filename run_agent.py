@@ -751,6 +751,11 @@ class AIAgent:
                 logger.error(
                     "1+4 context compression failed at %d%%: %s", pct, exc
                 )
+            # 1+4 体系: 80% 时自动生成 handoff 交接包, 通知 GUI 开新窗口
+            try:
+                self._emit_auto_handoff_notice(pct)
+            except Exception as exc:
+                logger.debug("auto-handoff notice failed: %s", exc)
         elif pct >= 70:
             logger.warning(
                 "1+4 context usage at %d%%, compress candidate", pct
@@ -765,6 +770,58 @@ class AIAgent:
             # Call existing compression if available
             if hasattr(cc, 'compress'):
                 cc.compress()
+
+    def _emit_auto_handoff_notice(self, pct: int) -> None:
+        """1+4 体系: 80% context 时提取 handoff + 通知 GUI 开新窗口。
+
+        从当前会话提取结构化 handoff 包, 写入 ~/.hermes/.auto-handoff.json,
+        并通过 notice_callback 通知 Electron GUI 弹出新对话窗口。
+        """
+        import json as _json
+        import os as _os
+        from agent.handoff import extract_handoff as _extract_handoff
+
+        # 收集当前会话摘要
+        try:
+            last_response = getattr(self, '_last_response_text', '') or ''
+        except Exception:
+            last_response = ''
+        handoff = _extract_handoff(last_response)
+
+        # 补充 session 元信息
+        handoff['session_id'] = getattr(self, 'session_id', '')
+        handoff['context_usage_pct'] = pct
+        handoff['model'] = getattr(self, 'model', '')
+        handoff['timestamp'] = __import__('datetime').datetime.now().isoformat()
+
+        # 写入交接文件
+        handoff_path = _os.path.expanduser('~/.hermes/.auto-handoff.json')
+        try:
+            _os.makedirs(_os.path.dirname(handoff_path), exist_ok=True)
+            with open(handoff_path, 'w', encoding='utf-8') as f:
+                _json.dump(handoff, f, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            logger.debug("failed to write auto-handoff file: %s", exc)
+
+        # 构造通知
+        notice = {
+            'type': 'auto-new-session',
+            'key': '1plus4-handoff',
+            'handoff': handoff,
+            'message': (
+                f'上下文已达 {pct}%, 已自动生成任务交接包。'
+                f'建议在新窗口继续对话。'
+            ),
+        }
+        self._emit_notice(notice)
+        logger.info(
+            "1+4 auto-handoff: context=%d%%, session=%s, "
+            "changed_files=%d, decisions=%d",
+            pct,
+            handoff.get('session_id', ''),
+            len(handoff.get('changed_files', [])),
+            len(handoff.get('decisions', [])),
+        )
 
     def switch_model(self, new_model, new_provider, api_key='', base_url='', api_mode=''):
         """Forwarder — see ``agent.agent_runtime_helpers.switch_model``."""

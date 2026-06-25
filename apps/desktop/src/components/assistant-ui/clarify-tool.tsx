@@ -2,7 +2,7 @@
 
 import { type ToolCallMessagePartProps } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
-import { type FormEvent, type KeyboardEvent, useCallback, useMemo, useRef, useState, type ComponentProps } from 'react'
+import { type FormEvent, type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from 'react'
 
 import { ToolFallback } from '@/components/assistant-ui/tool-fallback'
 import { Button } from '@/components/ui/button'
@@ -112,14 +112,46 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
   const [draft, setDraft] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [selectedChoice, setSelectedChoice] = useState<string | null>(null)
+  const [loadingTimedOut, setLoadingTimedOut] = useState(false)
+  const loadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 
   // Race: tool.start fires a tick before clarify.request, so request_id
   // arrives slightly after the tool block mounts. Hold the whole panel on a
   // spinner until the gateway request is wired — showing disabled choices or
   // a "loading question" stub is worse than a brief wait.
+  //
+  // However, if the clarify.request event never arrives (page refresh before
+  // my backend replay fix, event lost in transit, session mismatch after
+  // reconnect, or clarify already timed out server-side), the spinner would
+  // previously spin forever ("不知道是否正在工作中").  After a 10 s timeout
+  // we surface the question from the tool-call args with a note that the
+  // live request wasn't found, so the user sees what Hermes asked instead
+  // of a dead spinner.
   const ready = Boolean(matchingRequest?.requestId)
   const loading = !ready && !submitting
+
+  // Start / clear the loading timeout whenever loading state changes.
+  useEffect(() => {
+    if (loading && !loadingTimedOut) {
+      loadingTimerRef.current = setTimeout(() => {
+        setLoadingTimedOut(true)
+      }, 10_000)
+    } else if (!loading) {
+      if (loadingTimerRef.current) {
+        clearTimeout(loadingTimerRef.current)
+        loadingTimerRef.current = null
+      }
+      setLoadingTimedOut(false)
+    }
+
+    return () => {
+      if (loadingTimerRef.current) {
+        clearTimeout(loadingTimerRef.current)
+        loadingTimerRef.current = null
+      }
+    }
+  }, [loading, loadingTimedOut])
 
   const respond = useCallback(
     async (answer: string) => {
@@ -184,7 +216,7 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
     [draft, respond]
   )
 
-  if (loading) {
+  if (loading && !loadingTimedOut) {
     return (
       <ClarifyShell
         aria-label={copy.loadingQuestion}
@@ -192,6 +224,42 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
         role="status"
       >
         <Loader2 aria-hidden className="size-5 animate-spin text-muted-foreground/80" />
+      </ClarifyShell>
+    )
+  }
+
+  // Loading timed out — the clarify.request event never materialised.
+  // Show the question from the tool-call args as a read-only fallback so
+  // the user at least sees what Hermes asked instead of a dead spinner.
+  if (loading && loadingTimedOut) {
+    return (
+      <ClarifyShell
+        aria-label={copy.loadingQuestion}
+        className="grid gap-4 px-3 py-3"
+        role="status"
+      >
+        {question ? (
+          <>
+            <div className="flex items-start gap-2.5">
+              <span
+                aria-hidden
+                className="mt-px grid size-6 shrink-0 place-items-center rounded-md bg-[color-mix(in_srgb,var(--dt-warn)_14%,transparent)] text-[var(--warn)] ring-1 ring-inset ring-[var(--warn)]/15"
+              >
+                <HelpCircle className="size-3.5" />
+              </span>
+              <span className="flex-1 whitespace-pre-wrap text-sm font-medium leading-snug text-foreground/80">
+                {question}
+              </span>
+            </div>
+            <p className="text-[0.6875rem] leading-relaxed text-muted-foreground">
+              {copy.timedOutNote}
+            </p>
+          </>
+        ) : (
+          <p className="text-[0.6875rem] leading-relaxed text-muted-foreground text-center">
+            {copy.timedOutNote}
+          </p>
+        )}
       </ClarifyShell>
     )
   }

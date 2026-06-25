@@ -145,7 +145,24 @@ const APP_ROOT = app.getAppPath()
 
 function hiddenWindowsChildOptions(options = {}) {
   if (!IS_WINDOWS || Object.prototype.hasOwnProperty.call(options, 'windowsHide')) {
+    if (IS_WINDOWS) {
+      // DIAGNOSTIC: log every call site to find which spawn is leaking
+      // the cmd window. Streams to %LOCALAPPDATA%\hermes\hermes-agent\logs\desktop-spawn.log
+      try {
+        const _logPath = path.join(HERMES_HOME || process.cwd(), 'logs', 'desktop-spawn.log')
+        fs.appendFileSync(_logPath,
+          `[${new Date().toISOString()}] skip windowsHide: caller-set=${JSON.stringify(Object.keys(options))}\n`)
+      } catch (e) { void e }
+    }
     return options
+  }
+  if (IS_WINDOWS) {
+    try {
+      const _logPath = path.join(HERMES_HOME || process.cwd(), 'logs', 'desktop-spawn.log')
+      const _stack = new Error().stack.split('\n').slice(2, 6).join(' | ')
+      fs.appendFileSync(_logPath,
+        `[${new Date().toISOString()}] add windowsHide: stack=${_stack}\n`)
+    } catch (e) { void e }
   }
   return { ...options, windowsHide: true }
 }
@@ -5214,6 +5231,12 @@ async function startHermes() {
 
     await advanceBootProgress('backend.spawn', `Starting Hermes backend via ${backend.label}`, 84)
     rememberLog(`Starting Hermes backend via ${backend.label}`)
+    // DIAGNOSTIC: log the actual command + args that will be spawned
+    try {
+      const _logPath = path.join(HERMES_HOME || process.cwd(), 'logs', 'desktop-spawn.log')
+      fs.appendFileSync(_logPath,
+        `[${new Date().toISOString()}] startHermes spawn: cmd=${backend.command} args=${JSON.stringify(backend.args)} shell=${backend.shell}\n`)
+    } catch (e) { void e }
 
     hermesProcess = spawn(
       backend.command,
@@ -5440,6 +5463,106 @@ function createSessionWindow(sessionId, { watch = false } = {}) {
 // Open a fresh compact window on the new-session draft (#/). Not registry-keyed:
 // like ⌘N in a browser, every press opens a new window — and a draft window that
 // later converts to a real session must not get refocused as if it were blank.
+
+// 1+4 体系: 监听 ~/.hermes/.auto-handoff.json, 检测到 80% context 交接包时
+// 自动弹出新会话窗口并注入 handoff 摘要到 composer。
+function startAutoHandoffWatcher() {
+  const fs = require('fs')
+  const path = require('path')
+  const handoffFile = path.join(require('os').homedir(), '.hermes', '.auto-handoff.json')
+
+  let lastMtimeMs = 0
+
+  function checkHandoff() {
+    let stat
+    try {
+      stat = fs.statSync(handoffFile)
+    } catch {
+      return
+    }
+    if (!stat.isFile()) return
+    const mtimeMs = stat.mtimeMs
+    if (mtimeMs <= lastMtimeMs) return
+    lastMtimeMs = mtimeMs
+
+    let handoff
+    try {
+      handoff = JSON.parse(fs.readFileSync(handoffFile, 'utf-8'))
+    } catch {
+      return
+    }
+
+    // 跳过已处理的旧通知 (30s 内不重复处理)
+    const age = Date.now() - mtimeMs
+    if (age > 30000) return
+
+    const pct = handoff.context_usage_pct || 80
+    rememberLog(`[1+4] auto-handoff triggered: context=${pct}%`)
+
+    // 构建注入文本
+    const lines = [
+      `[1+4 任务交接 — 来自上一会话 (上下文 ${pct}%)]`,
+      ''
+    ]
+    if (handoff.changed_files && handoff.changed_files.length > 0) {
+      lines.push('**修改的文件:**')
+      handoff.changed_files.forEach(f => { lines.push(`- ${f}`) })
+      lines.push('')
+    }
+    if (handoff.decisions && handoff.decisions.length > 0) {
+      lines.push('**关键决策:**')
+      handoff.decisions.forEach(d => { lines.push(`- ${d}`) })
+      lines.push('')
+    }
+    if (handoff.next_step) {
+      lines.push(`**下一步:** ${handoff.next_step}`)
+      lines.push('')
+    }
+    if (handoff.blocking_issues && handoff.blocking_issues.length > 0) {
+      lines.push('**阻塞问题:**')
+      handoff.blocking_issues.forEach(i => { lines.push(`- ${i}`) })
+      lines.push('')
+    }
+    if (handoff.tests_run && handoff.tests_run.length > 0) {
+      lines.push('**已运行测试:**')
+      handoff.tests_run.slice(0, 3).forEach(t => { lines.push(`- ${t}`) })
+      lines.push('')
+    }
+    const handoffText = lines.join('\n')
+
+    // 创建新会话窗口
+    const win = createNewSessionWindow()
+    if (!win) return
+
+    // 窗口加载后注入 handoff 到 composer
+    const injectHandoff = () => {
+      if (win.isDestroyed()) return
+      try {
+        win.webContents.executeJavaScript(`
+          (function() {
+            var detail = { mode: 'block', target: 'main', text: ${JSON.stringify(handoffText)} };
+            window.dispatchEvent(new CustomEvent('hermes:composer-insert', { detail: detail }));
+            return true;
+          })()
+        `).catch(() => {})
+      } catch (_) {}
+    }
+
+    // 等待 renderer 加载完成
+    if (win.webContents.isLoading()) {
+      win.webContents.once('did-finish-load', () => {
+        setTimeout(injectHandoff, 1500) // 等 React mount
+      })
+    } else {
+      setTimeout(injectHandoff, 1500)
+    }
+  }
+
+  // 每 3 秒轮询 (fs.watch 在 Windows 上跨盘符不可靠, 用轮询保底)
+  setInterval(checkHandoff, 3000)
+  checkHandoff() // 启动时检查一次 (可能有遗留的 handoff)
+}
+
 function createNewSessionWindow() {
   return spawnSecondaryWindow({ newSession: true })
 }
@@ -6963,6 +7086,8 @@ function handleDeepLink(url) {
     return
   }
   // hermes://blueprint/<key>?slot=val  -> host="blueprint", path="/<key>"
+  // hermes://window/session/<id>       -> host="window",   path="/session/<id>"
+  // hermes://window/new                -> host="window",   path="/new"
   const kind = parsed.hostname || ''
   const name = decodeURIComponent((parsed.pathname || '').replace(/^\//, ''))
   const params = {}
@@ -6970,6 +7095,45 @@ function handleDeepLink(url) {
     params[k] = v
   })
   const payload = { kind, name, params }
+
+  // hermes://window/... links are *consumed* by the main process itself:
+  // they call createSessionWindow / createNewSessionWindow, which is an
+  // Electron-side API the renderer cannot invoke. The renderer gets a
+  // 'hermes:deep-link' event only for kinds it knows how to handle (e.g.
+  // 'blueprint'). If the renderer isn't ready yet, we still queue the
+  // window kind in _pendingDeepLink so the deep-link-ready handshake below
+  // will replay it once the main window exists.
+  if (kind === 'window') {
+    const cmd = parseWindowDeepLink(url)
+    if (cmd.kind === null) {
+      rememberLog(`[deeplink] ignoring unparseable window link: ${url}`)
+      return
+    }
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      // No main window yet (cold start, or it was closed). Queue and replay
+      // via the deep-link-ready handshake once createWindow() finishes.
+      _pendingDeepLink = payload
+      return
+    }
+    try {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
+      if (cmd.kind === 'session') {
+        if (!cmd.sessionId) {
+          rememberLog(`[deeplink] window/session link missing sessionId: ${url}`)
+          return
+        }
+        createSessionWindow(cmd.sessionId, { watch: cmd.watch === true })
+        rememberLog(`[deeplink] opened window for session/${cmd.sessionId}${cmd.watch ? ' (watch)' : ''}`)
+      } else if (cmd.kind === 'new') {
+        createNewSessionWindow()
+        rememberLog(`[deeplink] opened new-session window`)
+      }
+    } catch (err) {
+      rememberLog(`[deeplink] window open failed: ${err.message}`)
+    }
+    return
+  }
 
   if (!_rendererReadyForDeepLink || !mainWindow || mainWindow.isDestroyed()) {
     _pendingDeepLink = payload
@@ -7051,6 +7215,9 @@ app.whenReady().then(() => {
   configureSpellChecker()
   registerPowerResumeListeners()
   createWindow()
+
+  // 1+4 体系: 监听 auto-handoff 文件, 80% context 时自动弹出新窗口
+  startAutoHandoffWatcher()
 
   // Win/Linux cold start: the launching hermes:// URL is in our own argv.
   const _coldStartLink = _extractDeepLink(process.argv)

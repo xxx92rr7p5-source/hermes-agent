@@ -14,3 +14,4 @@ verified_at: null
 archived: false
 handoff_context: openspec/changes/hermes-1plus4-defense-injection/.comet/handoff/design-context.json
 handoff_hash: 32f4d8a8f3c97a47550850456a80423235b55fc5e4f272d28dcf74c65ee485eb
+build_command: scripts/run_tests.sh -v --tb=short 2>&1 | tail -5

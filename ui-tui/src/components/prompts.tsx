@@ -166,6 +166,12 @@ export function ClarifyPrompt({ cols = 80, onAnswer, onCancel, req, t }: Clarify
 
     if (n >= 1 && n <= choices.length) {
       onAnswer(choices[n - 1]!)
+
+      return
+    }
+
+    if (n === choices.length + 1) {
+      setTyping(true)
     }
   })
 

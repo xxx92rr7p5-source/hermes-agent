@@ -4,7 +4,8 @@ const test = require('node:test')
 const {
   buildSessionWindowUrl,
   chatWindowWebPreferences,
-  createSessionWindowRegistry
+  createSessionWindowRegistry,
+  parseWindowDeepLink
 } = require('./session-windows.cjs')
 
 // A minimal fake BrowserWindow: tracks listeners + destroyed state and lets a
@@ -196,4 +197,51 @@ test('chatWindowWebPreferences passes the preload path through and keeps the har
   assert.equal(prefs.contextIsolation, true)
   assert.equal(prefs.sandbox, true)
   assert.equal(prefs.nodeIntegration, false)
+})
+
+test('parseWindowDeepLink extracts a session id and watch flag from hermes://window/session/<id>?watch=1', () => {
+  const cmd = parseWindowDeepLink('hermes://window/session/abc-123?watch=1')
+
+  assert.deepEqual(cmd, { kind: 'session', sessionId: 'abc-123', watch: true })
+})
+
+test('parseWindowDeepLink defaults watch to false when the query flag is missing', () => {
+  const cmd = parseWindowDeepLink('hermes://window/session/abc-123')
+
+  assert.deepEqual(cmd, { kind: 'session', sessionId: 'abc-123', watch: false })
+})
+
+test('parseWindowDeepLink accepts the truthy "true" form of the watch flag', () => {
+  const cmd = parseWindowDeepLink('hermes://window/session/abc-123?watch=true')
+
+  assert.equal(cmd.kind, 'session')
+  assert.equal(cmd.watch, true)
+})
+
+test('parseWindowDeepLink parses a hermes://window/new as { kind: "new" }', () => {
+  const cmd = parseWindowDeepLink('hermes://window/new')
+
+  assert.deepEqual(cmd, { kind: 'new' })
+})
+
+test('parseWindowDeepLink returns kind=null for non-window deep links (e.g. blueprint)', () => {
+  const cmd = parseWindowDeepLink('hermes://blueprint/foo?slot=08:00')
+
+  assert.equal(cmd.kind, null)
+})
+
+test('parseWindowDeepLink returns kind=null for malformed / non-hermes URLs', () => {
+  assert.equal(parseWindowDeepLink('').kind, null)
+  assert.equal(parseWindowDeepLink(null).kind, null)
+  assert.equal(parseWindowDeepLink(42).kind, null)
+  assert.equal(parseWindowDeepLink('not a url').kind, null)
+  assert.equal(parseWindowDeepLink('https://example.com/window/session/abc').kind, null)
+  assert.equal(parseWindowDeepLink('hermes://window/unknown-action').kind, null)
+})
+
+test('parseWindowDeepLink URL-decodes session ids with reserved characters', () => {
+  const cmd = parseWindowDeepLink('hermes://window/session/a%20b%2Fc')
+
+  assert.equal(cmd.kind, 'session')
+  assert.equal(cmd.sessionId, 'a b/c')
 })

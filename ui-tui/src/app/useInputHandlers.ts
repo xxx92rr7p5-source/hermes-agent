@@ -13,6 +13,7 @@ import type {
 } from '../gatewayTypes.js'
 import { isAction, isCopyShortcut, isMac, isVoiceToggleKey } from '../lib/platform.js'
 import { computePrecisionWheelStep, initPrecisionWheel } from '../lib/precisionWheel.js'
+import { rpcErrorMessage } from '../lib/rpc.js'
 import { computeWheelStep, initWheelAccelForHost } from '../lib/wheelAccel.js'
 
 import { getInputSelection } from './inputSelectionStore.js'
@@ -147,18 +148,34 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       return gateway
         .rpc<ApprovalRespondResponse>('approval.respond', { choice: 'deny', session_id: getUiState().sid })
         .then(r => r && (patchOverlayState({ approval: null }), patchTurnState({ outcome: 'denied' })))
+        .catch((e: unknown) => {
+          // 4009 "no pending answer request" — server already consumed the
+          // approval prompt (timeout / re-bind). Clear the overlay anyway
+          // so Ctrl+C doesn't leave the TUI stuck on the approval dialog.
+          patchOverlayState({ approval: null })
+          patchTurnState({ outcome: 'denied' })
+          actions.sys(`approval cancelled (rpc: ${rpcErrorMessage(e)})`)
+        })
     }
 
     if (overlay.sudo) {
       return gateway
         .rpc<SudoRespondResponse>('sudo.respond', { password: '', request_id: overlay.sudo.requestId })
         .then(r => r && (patchOverlayState({ sudo: null }), actions.sys('sudo cancelled')))
+        .catch((e: unknown) => {
+          patchOverlayState({ sudo: null })
+          actions.sys(`sudo cancelled (rpc: ${rpcErrorMessage(e)})`)
+        })
     }
 
     if (overlay.secret) {
       return gateway
         .rpc<SecretRespondResponse>('secret.respond', { request_id: overlay.secret.requestId, value: '' })
         .then(r => r && (patchOverlayState({ secret: null }), actions.sys('secret entry cancelled')))
+        .catch((e: unknown) => {
+          patchOverlayState({ secret: null })
+          actions.sys(`secret cancelled (rpc: ${rpcErrorMessage(e)})`)
+        })
     }
 
     if (overlay.modelPicker) {
