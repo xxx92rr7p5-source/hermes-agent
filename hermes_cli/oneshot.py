@@ -171,11 +171,37 @@ def run_oneshot(
     os.environ["HERMES_YOLO_MODE"] = "1"
     os.environ["HERMES_ACCEPT_HOOKS"] = "1"
 
-    # Redirect stderr AND stdout to devnull for the entire call tree.
-    # We'll print the final response to the real stdout at the end.
+    # Progress feedback for one-shot mode: print a status line before
+    # redirecting all output. Long prompts can take 30-120s with no output;
+    # a silent terminal looks broken. The progress heartbeat writes a dot
+    # every 5s to stderr while the agent runs (1+4 optimization: observable).
+    import threading as _threading
     real_stdout = sys.stdout
     real_stderr = sys.stderr
     devnull = open(os.devnull, "w", encoding="utf-8")
+
+    prompt_len = len(prompt) if prompt else 0
+    model_hint = (model or "").strip() or os.getenv("HERMES_INFERENCE_MODEL", "").strip() or "default"
+    real_stderr.write(
+        f"hermes -z: running (model={model_hint}, prompt={prompt_len} chars)...\n"
+    )
+    real_stderr.flush()
+
+    # Heartbeat: write a '.' every 5s so the user knows the agent hasn't hung
+    _heartbeat_stop = _threading.Event()
+    _heartbeat_count = [0]
+
+    def _heartbeat():
+        while not _heartbeat_stop.wait(5.0):
+            _heartbeat_count[0] += 1
+            try:
+                real_stderr.write(".")
+                real_stderr.flush()
+            except Exception:
+                pass
+
+    _heartbeat_thread = _threading.Thread(target=_heartbeat, daemon=True)
+    _heartbeat_thread.start()
 
     response: Optional[str] = None
     failure: BaseException | None = None
@@ -190,23 +216,20 @@ def run_oneshot(
                     use_config_toolsets=use_config_toolsets,
                 )
             except BaseException as exc:  # noqa: BLE001
-                # Capture anything that escapes the agent (including OSError
-                # from prompt_toolkit/Vt100 when stdout is a non-TTY pipe,
-                # KeyboardInterrupt, SystemExit, etc.) so we can surface it on
-                # the real stderr instead of crashing past the redirect with a
-                # traceback that the caller never sees. A silent exit in a
-                # cron / SSH / subprocess context is the worst failure mode.
-                # See #30623.
                 failure = exc
     finally:
+        _heartbeat_stop.set()
         try:
             devnull.close()
         except Exception:
             pass
 
+    if _heartbeat_count[0] > 0:
+        real_stderr.write(f" ({_heartbeat_count[0] * 5}s)\n")
+    else:
+        real_stderr.write("\n")
+
     if failure is not None:
-        # Re-raise control-flow exceptions so the parent handles them as usual
-        # (Ctrl-C / explicit sys.exit() inside the agent).
         if isinstance(failure, (KeyboardInterrupt, SystemExit)):
             raise failure
         real_stderr.write(f"hermes -z: agent failed: {failure}\n")
@@ -218,7 +241,7 @@ def run_oneshot(
         real_stderr.flush()
         return 1
 
-    assert response is not None  # narrowed by the empty-response guard above
+    assert response is not None
     real_stdout.write(response)
     if not response.endswith("\n"):
         real_stdout.write("\n")
