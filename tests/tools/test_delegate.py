@@ -332,9 +332,18 @@ class TestDelegateTask(unittest.TestCase):
             tasks=[{"goal": "Actual task"}],
             parent_agent=parent,
         ))
-        # The mock was called with the tasks array item, not the top-level goal
+        # The mock was called with the tasks array item (injected), not the top-level goal
         call_args = mock_run.call_args
-        self.assertEqual(call_args.kwargs.get("goal") or call_args[1].get("goal", call_args[0][1] if len(call_args[0]) > 1 else None), "Actual task")
+        actual_goal = call_args.kwargs.get("goal") or call_args[1].get("goal", call_args[0][1] if len(call_args[0]) > 1 else None)
+        self.assertIn("Actual task", actual_goal)
+        # Verify the 8-field defensive template was injected
+        self.assertIn("[Task]: Actual task", actual_goal)
+        self.assertIn("ACCEPTANCE:", actual_goal)
+        self.assertIn("WORKSPACE:", actual_goal)
+        self.assertIn("TIMEOUT:", actual_goal)
+        self.assertIn("INSTALL_POLICY:", actual_goal)
+        self.assertIn("FORBIDDEN_FILES:", actual_goal)
+        self.assertIn("VISION_REQUIRED:", actual_goal)
 
     @patch("tools.delegate_tool._run_single_child")
     def test_failed_child_included_in_results(self, mock_run):

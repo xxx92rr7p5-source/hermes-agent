@@ -2081,6 +2081,55 @@ def _recover_tasks_from_json_string(
     return parsed, None
 
 
+# ==== 1+4 体系防御注入: 5 防御话 8 字段模板 ====
+
+_DEFENSIVE_TEMPLATE = """[Task]: {goal}
+
+ACCEPTANCE: (≥6 项可验证 checklist — 由派单者填写)
+WORKSPACE: {workspace}
+TIMEOUT: {timeout}s
+DEPENDENCIES: parents=[]
+NO FABRICATION: 没做就说没做, cite file:line, 不编 PR / id
+INSTALL_POLICY: {install_policy}
+FORBIDDEN_FILES: {forbidden_files}
+VISION_REQUIRED: {vision_required}"""
+
+
+def _inject_defensive_phrase(goal: str, overrides: dict = None) -> str:
+    """注入 5 防御话 8 字段模板到 goal 开头。
+
+    幂等: 如果 goal 已以 '[Task]:' 开头则跳过注入。
+    默认值从 delegation.defensive_phrase config 读取。
+    overrides 字典允许逐字段覆盖默认值。
+
+    Returns:
+        注入 8 字段后的完整 goal 字符串
+    """
+    goal_stripped = goal.strip() if goal else ""
+    if goal_stripped.startswith('[Task]:'):
+        return goal  # 已注入, 幂等跳过
+
+    cfg = _load_config()
+    defense = cfg.get('defensive_phrase', {})
+
+    params = {
+        'goal': goal_stripped,
+        'workspace': os.getenv('TERMINAL_CWD', ''),
+        'timeout': defense.get('timeout', 1800),
+        'install_policy': defense.get('install_policy', 'pnpm-lock'),
+        'forbidden_files': ', '.join(defense.get('forbidden_files', [
+            'hermes_state.py',
+            'hermes_constants.py',
+            'hermes_logging.py',
+        ])),
+        'vision_required': str(defense.get('vision_required', False)).lower(),
+    }
+    if overrides:
+        params.update(overrides)
+
+    return _DEFENSIVE_TEMPLATE.format(**params)
+
+
 def delegate_task(
     goal: Optional[str] = None,
     context: Optional[str] = None,
@@ -2189,10 +2238,13 @@ def delegate_task(
                 f"delegate_task calls, or increase "
                 f"delegation.max_concurrent_children in config.yaml."
             )
+        for t in tasks:
+            if isinstance(t, dict) and 'goal' in t:
+                t['goal'] = _inject_defensive_phrase(t['goal'])
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [
-            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role}
+            {"goal": _inject_defensive_phrase(goal), "context": context, "toolsets": toolsets, "role": top_role}
         ]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
