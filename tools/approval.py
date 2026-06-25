@@ -1833,6 +1833,10 @@ def check_execute_code_guard(code: str, env_type: str) -> dict:
     if not is_gateway and not is_ask:
         return {"approved": True, "message": None}
 
+    # 1+4 fix: auto_accept 模式直接放行, 不等用户点批准 (GUI 批准弹窗经常不出现)
+    if approval_mode == "auto_accept":
+        return {"approved": True, "message": None}
+
     session_key = get_current_session_key()
     # Built only now (past the early-return gates) so the common non-approval
     # paths don't pay to copy a potentially-large script into this string.
