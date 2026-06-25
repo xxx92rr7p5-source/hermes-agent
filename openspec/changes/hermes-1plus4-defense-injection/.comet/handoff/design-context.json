@@ -1,0 +1,13 @@
+{
+  "change": "hermes-1plus4-defense-injection",
+  "phase": "design",
+  "mode": "compact",
+  "canonical_spec": "openspec",
+  "generated_by": "comet-handoff.sh",
+  "context_hash": "32f4d8a8f3c97a47550850456a80423235b55fc5e4f272d28dcf74c65ee485eb",
+  "files": [
+    { "path": "openspec/changes/hermes-1plus4-defense-injection/proposal.md", "sha256": "fcc162517fe85bdbc1c41066f035027a4c2ea4e474c619a98562366aa5bc8933" },
+    { "path": "openspec/changes/hermes-1plus4-defense-injection/design.md", "sha256": "c6e2645e240860e1693bb3ba4a71cf474a15843f55a49dd017e7f295d89cf39b" },
+    { "path": "openspec/changes/hermes-1plus4-defense-injection/tasks.md", "sha256": "dffe75c1dc2fa4acf0d588dc119acca82856686a33f0f147621592d7fabdfb21" }
+  ]
+}

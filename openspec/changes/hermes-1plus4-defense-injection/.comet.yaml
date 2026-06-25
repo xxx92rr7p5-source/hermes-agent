@@ -1,0 +1,16 @@
+workflow: full
+phase: build
+build_mode: subagent-driven-development
+isolation: worktree
+verify_mode: null
+base_ref: bede8fc4993b5c1ee680ee818f229f0c4e5b2684
+design_doc: docs/superpowers/specs/2026-06-25-hermes-1plus4-defense-injection-design.md
+plan: docs/superpowers/plans/2026-06-25-hermes-1plus4-defense-injection.md
+verify_result: pending
+verification_report: null
+branch_status: pending
+created_at: 2026-06-25
+verified_at: null
+archived: false
+handoff_context: openspec/changes/hermes-1plus4-defense-injection/.comet/handoff/design-context.json
+handoff_hash: 32f4d8a8f3c97a47550850456a80423235b55fc5e4f272d28dcf74c65ee485eb
