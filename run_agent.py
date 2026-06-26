@@ -767,6 +767,7 @@ class AIAgent:
         pct = int(input_tokens / max_ctx * 100)
         self._context_usage_percent = pct
 
+        # 1+4 三级阈值 (SOUL.md: 40% 开新窗口)
         if pct >= 80:
             logger.warning(
                 "1+4 context usage at %d%%, triggering forced compression", pct
@@ -777,17 +778,23 @@ class AIAgent:
                 logger.error(
                     "1+4 context compression failed at %d%%: %s", pct, exc
                 )
-            # 1+4 体系: 80% 时自动生成 handoff 交接包, 通知 GUI 开新窗口
             try:
                 self._emit_auto_handoff_notice(pct)
             except Exception as exc:
                 logger.debug("auto-handoff notice failed: %s", exc)
-        elif pct >= 70:
+        elif pct >= 60:
             logger.warning(
-                "1+4 context usage at %d%%, compress candidate", pct
+                "1+4 context usage at %d%%, generating handoff", pct
             )
-        elif pct >= 50:
-            logger.info("1+4 context usage at %d%%", pct)
+            # 60% 时提前生成 handoff, 通知 GUI 开新窗口
+            try:
+                self._emit_auto_handoff_notice(pct)
+            except Exception as exc:
+                logger.debug("auto-handoff notice failed: %s", exc)
+        elif pct >= 40:
+            logger.info(
+                "1+4 context usage at %d%%, consider new window", pct
+            )
 
     def _trigger_context_compression(self) -> None:
         """触发 context 压缩 (1+4 体系 80% 强制压缩)。
