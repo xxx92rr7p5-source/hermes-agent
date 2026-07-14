@@ -2127,6 +2127,22 @@ def terminal_tool(
                 ),
             }, ensure_ascii=False)
 
+        # Auto-notify guard: background=true without notify_on_complete=true
+        # OR watch_patterns runs silently — the agent cannot learn it finished
+        # without explicit poll/wait. Auto-enable notify_on_complete for bounded
+        # background tasks unless explicitly opted out via env/config.
+        # May 2026 PR #31231 incident: bg CI poller ran fine, exited green,
+        # agent never noticed — user had to surface the result.
+        # Set TERMINAL_AUTO_NOTIFY_ON_COMPLETE=false to disable this guard.
+        _auto_notify = os.getenv("TERMINAL_AUTO_NOTIFY_ON_COMPLETE", "true").lower() in {"true", "1", "yes"}
+        if background and not notify_on_complete and not watch_patterns and _auto_notify:
+            logger.warning(
+                "Auto-enabling notify_on_complete for background task: %s... "
+                "(set TERMINAL_AUTO_NOTIFY_ON_COMPLETE=false to disable)",
+                command[:120],
+            )
+            notify_on_complete = True
+
         # Guardrail: long-lived server/watch commands should run as managed
         # background sessions, not foreground shell hacks.
         if not background:

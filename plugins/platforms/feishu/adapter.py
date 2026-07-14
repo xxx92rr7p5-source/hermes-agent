@@ -190,7 +190,7 @@ _FEISHU_DOC_UPLOAD_TYPES = {
 # ---------------------------------------------------------------------------
 
 _MAX_TEXT_INJECT_BYTES = 100 * 1024
-_FEISHU_CONNECT_ATTEMPTS = 3
+_FEISHU_CONNECT_ATTEMPTS = 5  # increased from 3 — DNS outages can take >30s to resolve
 _FEISHU_SEND_ATTEMPTS = 3
 _FEISHU_APP_LOCK_SCOPE = "feishu-app-id"
 _DEFAULT_TEXT_BATCH_DELAY_SECONDS = 0.6
@@ -1426,13 +1426,13 @@ class FeishuAdapter(BasePlatformAdapter):
     supports_code_blocks = True  # Feishu renders fenced code blocks
     splits_long_messages = True  # send() chunks via truncate_message(MAX_MESSAGE_LENGTH)
 
-    MAX_MESSAGE_LENGTH = 8000
+    MAX_MESSAGE_LENGTH = int(os.getenv("FEISHU_MAX_MESSAGE_LENGTH", "8000"))
     # Max distinct chat IDs retained in _chat_locks before LRU eviction kicks in.
     CHAT_LOCK_MAX_SIZE: int = 1000
     # Threshold for detecting Feishu client-side message splits.
     # When a chunk is near the ~4096-char practical limit, a continuation
     # is almost certain.
-    _SPLIT_THRESHOLD = 4000
+    _SPLIT_THRESHOLD = int(os.getenv("FEISHU_SPLIT_THRESHOLD", "4000"))
 
     # =========================================================================
     # Lifecycle — init / settings / connect / disconnect
@@ -4706,11 +4706,35 @@ class FeishuAdapter(BasePlatformAdapter):
                 await self._stop_webhook_server()
                 if attempt >= _FEISHU_CONNECT_ATTEMPTS - 1:
                     raise
-                wait_seconds = 2 ** attempt
+                # Classify the error to pick the right backoff curve.
+                # DNS / name-resolution failures need longer waits because
+                # the local resolver or network interface may be recovering
+                # (DHCP renew, VPN reconnect, Wi-Fi roam).  Other errors
+                # (auth, 4xx) use the default fast exponential curve.
+                exc_msg = str(exc).lower()
+                is_dns = any(
+                    needle.lower() in exc_msg
+                    for needle in (
+                        "getaddrinfo failed",
+                        "nameresolutionerror",
+                        "failed to resolve",
+                        "nodename nor servname",
+                        "temporary failure in name resolution",
+                        "no address associated with hostname",
+                    )
+                )
+                if is_dns:
+                    # DNS outages can easily last 30-120s. Start at 15s and
+                    # grow to 60s so we don't burn all retries in the first
+                    # few seconds while the resolver is still down.
+                    wait_seconds = min(60, 15 * (2 ** attempt))
+                else:
+                    wait_seconds = 2 ** attempt
                 logger.warning(
-                    "[Feishu] Connect attempt %d/%d failed; retrying in %ds: %s",
+                    "[Feishu] Connect attempt %d/%d failed%s; retrying in %ds: %s",
                     attempt + 1,
                     _FEISHU_CONNECT_ATTEMPTS,
+                    " [DNS]" if is_dns else "",
                     wait_seconds,
                     exc,
                 )
@@ -4833,12 +4857,28 @@ class FeishuAdapter(BasePlatformAdapter):
                     raise
                 if attempt >= _FEISHU_SEND_ATTEMPTS - 1:
                     raise
-                wait_seconds = 2 ** attempt
+                # DNS / connection-reset errors get a longer initial wait
+                # to give the network stack time to recover.
+                exc_msg = str(exc).lower()
+                is_dns = any(
+                    needle.lower() in exc_msg
+                    for needle in (
+                        "getaddrinfo failed",
+                        "nameresolutionerror",
+                        "failed to resolve",
+                        "nodename nor servname",
+                    )
+                )
+                if is_dns:
+                    wait_seconds = min(60, 10 * (2 ** attempt))
+                else:
+                    wait_seconds = 2 ** attempt
                 logger.warning(
-                    "[Feishu] Send attempt %d/%d failed for chat %s; retrying in %ds: %s",
+                    "[Feishu] Send attempt %d/%d failed for chat %s%s; retrying in %ds: %s",
                     attempt + 1,
                     _FEISHU_SEND_ATTEMPTS,
                     chat_id,
+                    " [DNS]" if is_dns else "",
                     wait_seconds,
                     exc,
                 )
@@ -5634,6 +5674,10 @@ def _apply_yaml_config(yaml_cfg: dict, feishu_cfg: dict) -> dict | None:
     """
     if "allow_bots" in feishu_cfg and not os.getenv("FEISHU_ALLOW_BOTS"):
         os.environ["FEISHU_ALLOW_BOTS"] = str(feishu_cfg["allow_bots"]).lower()
+    if "max_message_length" in feishu_cfg and not os.getenv("FEISHU_MAX_MESSAGE_LENGTH"):
+        os.environ["FEISHU_MAX_MESSAGE_LENGTH"] = str(feishu_cfg["max_message_length"])
+    if "split_threshold" in feishu_cfg and not os.getenv("FEISHU_SPLIT_THRESHOLD"):
+        os.environ["FEISHU_SPLIT_THRESHOLD"] = str(feishu_cfg["split_threshold"])
     return None
 
 

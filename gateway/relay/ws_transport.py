@@ -433,7 +433,25 @@ class WebSocketRelayTransport:
         return {"name": info.get("name", chat_id), "type": info.get("type", "dm")}
 
     async def send_interrupt(self, session_key: str, reason: Optional[str] = None) -> None:
-        await self._send({"type": "interrupt", "session_key": session_key, "reason": reason})
+        """Send an interrupt frame to the connector with a short timeout.
+
+        Interrupts are time-sensitive UX operations — they should never block
+        for the full outbound timeout (30s) when the relay connection is
+        degraded.  A 5s cap means the caller gets a quick failure and can
+        fall back to local interrupt handling.
+        """
+        import asyncio as _asyncio
+        try:
+            await _asyncio.wait_for(
+                self._send({"type": "interrupt", "session_key": session_key, "reason": reason}),
+                timeout=5.0,
+            )
+        except (_asyncio.TimeoutError, RuntimeError, OSError) as exc:
+            logger.warning(
+                "relay: interrupt send failed for session %s (%s) — "
+                "connector may be offline or unreachable",
+                session_key, type(exc).__name__,
+            )
 
     # ── going-idle / buffered-flip (Phase 5 §5.3) ────────────────────────
     async def go_idle(self, timeout_s: float = 10.0) -> bool:

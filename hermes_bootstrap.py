@@ -183,6 +183,53 @@ def activate_durable_lazy_target() -> None:
         pass
 
 
+def apply_windows_proactor_shutdown_fix() -> bool:
+    """Suppress spurious ConnectionResetError during proactor socket cleanup.
+
+    On Windows, ``_ProactorBasePipeTransport._call_connection_lost()`` calls
+    ``self._sock.shutdown(SHUT_RDWR)`` on a socket that the peer may have
+    already closed.  That raises ``ConnectionResetError`` (WinError 10054),
+    which the asyncio callback runner logs as an unhandled exception.
+
+    When the event loop is already stalled (large state.db writes, busy
+    agent turns), the WebSocket drops and this error fires in rapid
+    succession — one per pending transport — flooding the log and
+    sometimes cascading into a process exit.
+
+    This patch wraps the method so ``ConnectionResetError`` and ``OSError``
+    are caught silently: the socket is already gone, there is nothing to
+    clean up, and the transport can finalise without noise.
+
+    Only touches Windows — POSIX proactor isn't affected.
+    """
+    global _bootstrap_applied
+
+    if not _IS_WINDOWS:
+        return False
+
+    try:
+        import asyncio.proactor_events as _ape
+    except ImportError:
+        return False
+
+    _original = _ape._ProactorBasePipeTransport._call_connection_lost
+
+    if getattr(_original, "_hermes_patched", False):
+        return False  # already patched
+
+    def _patched_call_connection_lost(self, exc=None):
+        try:
+            _original(self, exc)
+        except (ConnectionResetError, OSError):
+            # The peer already closed the socket — there is nothing left
+            # to shut down.  Absorb the error silently.
+            pass
+
+    _patched_call_connection_lost._hermes_patched = True
+    _ape._ProactorBasePipeTransport._call_connection_lost = _patched_call_connection_lost
+    return True
+
+
 # Apply on import — entry points just need ``import hermes_bootstrap``
 # (or ``from hermes_bootstrap import apply_windows_utf8_bootstrap``) at
 # the very top of their module, before importing anything else.  The
@@ -193,3 +240,7 @@ apply_windows_utf8_bootstrap()
 # packages installed into the data volume on a previous run are importable
 # this run, before any backend module imports its SDK. No-op when unset.
 activate_durable_lazy_target()
+
+# Suppress spurious Windows proactor ConnectionResetError during socket
+# cleanup — harmless noise that can cascade into process exit under load.
+apply_windows_proactor_shutdown_fix()

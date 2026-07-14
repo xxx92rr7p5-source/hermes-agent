@@ -15,7 +15,8 @@ from providers.base import ProviderProfile
 
 def _is_minimax_global_openai_base_url(base_url: str | None) -> bool:
     parsed = urlparse(str(base_url or "").strip())
-    if (parsed.hostname or "").lower() != "api.minimax.io":
+    host = (parsed.hostname or "").lower()
+    if host not in {"api.minimax.io", "api.minimaxi.com"}:
         return False
     path = parsed.path.rstrip("/").lower()
     return path == "/v1"

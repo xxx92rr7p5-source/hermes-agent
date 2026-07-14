@@ -91,9 +91,68 @@ QR_TIMEOUT_MS = 35_000
 MAX_CONSECUTIVE_FAILURES = 3
 RETRY_DELAY_SECONDS = 2
 BACKOFF_DELAY_SECONDS = 30
+# Exponential backoff parameters for network-level errors (DNS, connection reset, etc.)
+# These errors are usually transient infrastructure issues that resolve within
+# minutes, so we use a gentler backoff curve with jitter instead of hammering.
+BACKOFF_BASE_SECONDS = 5.0       # initial backoff for network errors
+BACKOFF_MAX_SECONDS = 300.0      # cap at 5 minutes between retries
+BACKOFF_MULTIPLIER = 1.8         # exponential growth factor
+BACKOFF_JITTER = 0.3             # ±30% random jitter to avoid thundering herd
+# DNS failures often indicate local resolver issues (DHCP lease expiry,
+# VPN reconnect, network interface flap) — use a longer initial backoff
+# and recreate the HTTP session to flush any cached bad state.
+DNS_BACKOFF_BASE_SECONDS = 15.0
 SESSION_EXPIRED_ERRCODE = -14
 RATE_LIMIT_ERRCODE = -2  # iLink frequency limit — backoff and retry
 MESSAGE_DEDUP_TTL_SECONDS = 300
+
+# Error substrings that indicate DNS / name-resolution failures.
+# These benefit from longer backoff + session recreation.
+_DNS_FAILURE_SUBSTRINGS = (
+    "getaddrinfo failed",
+    "NameResolutionError",
+    "Failed to resolve",
+    "nodename nor servname",
+    "Temporary failure in name resolution",
+    "No address associated with hostname",
+)
+
+# Error substrings that indicate the local network stack dropped the connection.
+# These often resolve quickly (Wi-Fi re-associate, VPN re-key) but should still
+# avoid tight-loop retries.
+_CONNECTION_RESET_SUBSTRINGS = (
+    "WinError 1236",
+    "Connection reset by peer",
+    "ConnectionResetError",
+    "由本地系统中止网络连接",
+    "Server disconnected",
+)
+
+
+def _is_dns_failure(exc: BaseException) -> bool:
+    """Return True when *exc* looks like a DNS / name-resolution error."""
+    msg = str(exc).lower()
+    return any(needle.lower() in msg for needle in _DNS_FAILURE_SUBSTRINGS)
+
+
+def _is_connection_reset(exc: BaseException) -> bool:
+    """Return True when *exc* looks like a local connection-reset error."""
+    msg = str(exc).lower()
+    return any(needle.lower() in msg for needle in _CONNECTION_RESET_SUBSTRINGS)
+
+
+def _jittered_backoff(base: float, attempt: int, max_wait: float = BACKOFF_MAX_SECONDS) -> float:
+    """Compute exponential backoff with uniform jitter.
+
+    ``attempt`` is 1-indexed (first retry = attempt 1).
+    Returns a sleep duration in seconds, clamped to [base, max_wait].
+    Jitter is applied BEFORE clamping so the result never exceeds max_wait.
+    """
+    import random as _random
+    raw = base * (BACKOFF_MULTIPLIER ** (attempt - 1))
+    jitter = 1.0 + _random.uniform(-BACKOFF_JITTER, BACKOFF_JITTER)
+    jittered = raw * jitter
+    return max(base, min(jittered, max_wait))
 
 
 def _is_stale_session_ret(
@@ -1338,7 +1397,12 @@ class WeixinAdapter(BasePlatformAdapter):
         assert self._poll_session is not None
         sync_buf = _load_sync_buf(self._hermes_home, self._account_id)
         timeout_ms = LONG_POLL_TIMEOUT_MS
+        # Track consecutive failures for the exponential backoff curve.
+        # Reset to 0 on any successful poll (including empty long-poll returns).
         consecutive_failures = 0
+        # Track the last time we recreated the poll session, to avoid
+        # recreating it on every DNS failure in a tight loop.
+        _last_session_recreate = 0.0
 
         while self._running:
             try:
@@ -1364,19 +1428,18 @@ class WeixinAdapter(BasePlatformAdapter):
                         continue
                     consecutive_failures += 1
                     logger.warning(
-                        "[%s] getUpdates failed ret=%s errcode=%s errmsg=%s (%d/%d)",
+                        "[%s] getUpdates failed ret=%s errcode=%s errmsg=%s (attempt %d, backoff %.1fs)",
                         self.name,
                         ret,
                         errcode,
                         response.get("errmsg", ""),
                         consecutive_failures,
-                        MAX_CONSECUTIVE_FAILURES,
+                        _jittered_backoff(BACKOFF_BASE_SECONDS, consecutive_failures),
                     )
-                    await asyncio.sleep(BACKOFF_DELAY_SECONDS if consecutive_failures >= MAX_CONSECUTIVE_FAILURES else RETRY_DELAY_SECONDS)
-                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                        consecutive_failures = 0
+                    await asyncio.sleep(_jittered_backoff(BACKOFF_BASE_SECONDS, consecutive_failures))
                     continue
 
+                # Successful poll — reset the backoff curve.
                 consecutive_failures = 0
                 new_sync_buf = str(response.get("get_updates_buf") or "")
                 if new_sync_buf:
@@ -1389,10 +1452,56 @@ class WeixinAdapter(BasePlatformAdapter):
                 break
             except Exception as exc:
                 consecutive_failures += 1
-                logger.error("[%s] poll error (%d/%d): %s", self.name, consecutive_failures, MAX_CONSECUTIVE_FAILURES, exc)
-                await asyncio.sleep(BACKOFF_DELAY_SECONDS if consecutive_failures >= MAX_CONSECUTIVE_FAILURES else RETRY_DELAY_SECONDS)
-                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    consecutive_failures = 0
+                is_dns = _is_dns_failure(exc)
+                is_reset = _is_connection_reset(exc)
+
+                # Pick the right base backoff: DNS failures get a longer
+                # initial wait to give the local resolver time to recover.
+                if is_dns:
+                    base = DNS_BACKOFF_BASE_SECONDS
+                elif is_reset:
+                    base = BACKOFF_BASE_SECONDS * 2.0
+                else:
+                    base = BACKOFF_BASE_SECONDS
+                wait = _jittered_backoff(base, consecutive_failures)
+
+                error_kind = (
+                    "DNS" if is_dns
+                    else "connection-reset" if is_reset
+                    else "network"
+                )
+                logger.error(
+                    "[%s] poll error [%s] (attempt %d, backoff %.1fs): %s",
+                    self.name, error_kind, consecutive_failures, wait, exc,
+                )
+
+                # On DNS failures, recreate the aiohttp session if we haven't
+                # done so recently.  The OS resolver or network interface may
+                # have changed (DHCP lease renew, VPN reconnect, Wi-Fi roam),
+                # and the old connector may hold cached DNS state that is now
+                # stale.  Rate-limit to once per 60 seconds to avoid churn.
+                if is_dns and self._poll_session is not None:
+                    now = time.monotonic()
+                    if now - _last_session_recreate >= 60.0:
+                        logger.warning(
+                            "[%s] DNS failure detected — recreating poll session "
+                            "to flush cached resolver state", self.name,
+                        )
+                        try:
+                            old_session = self._poll_session
+                            self._poll_session = aiohttp.ClientSession(
+                                trust_env=True, connector=_make_ssl_connector(),
+                            )
+                            if old_session and not old_session.closed:
+                                await old_session.close()
+                            _last_session_recreate = now
+                        except Exception as recreate_exc:
+                            logger.warning(
+                                "[%s] Failed to recreate poll session: %s",
+                                self.name, recreate_exc,
+                            )
+
+                await asyncio.sleep(wait)
 
     async def _process_message_safe(self, message: Dict[str, Any]) -> None:
         try:
